@@ -29,6 +29,8 @@ ammalloc/
 ├── CMakeLists.txt                 # 顶层构建配置（选项与子目录调度）
 ├── include/ammalloc/              # 公共头文件
 │   ├── ammalloc.h                 # 主入口：am_malloc/am_free
+│   ├── assert.h                   # 断言宏：AMMALLOC_CHECK / AMMALLOC_DCHECK
+│   ├── attributes.h               # 编译器属性与 builtin 包装宏
 │   ├── common.h                   # 公共类型与工具宏
 │   ├── config.h                   # 编译期与运行期配置
 │   ├── thread_cache.h             # TLS 前端缓存
@@ -79,9 +81,9 @@ ammalloc/
 
 ### **3. PageCache (后端 / Backend)**
 
-- **类型**: 全局单例。
-- **锁机制**: 全局大锁 (`std::mutex`)。
-- **职责**: 管理物理页级别的内存。处理 `Span` 的切分与相邻空闲块的合并 (Coalescing)。通过 `PageAllocator` 与操作系统交互。
+- **类型**: 全局单例，内部采用分片结构（`PageCacheShard`，容量 `kMaxShardCount = 4`，生产默认仅启用 1 个分片）。
+- **锁机制**: 每分片一把 `std::mutex`（分片锁）；当前默认只使用 shard 0，测试可通过 `SetActiveShardCountForTest` 扩展分片数。
+- **职责**: 管理物理页级别的内存。处理 `Span` 的切分与相邻空闲块的合并 (Coalescing)（合并仅在所属分片内进行，owner-shard-local）。通过 `PageAllocator` 与操作系统交互。
 
 ## 4. 硬性约束（绝不能违反）
 
@@ -89,7 +91,7 @@ ammalloc/
 
 - 不得在核心分配/释放的元数据路径中使用堆分配的 STL 容器（如 `std::vector`、`std::string`、`std::map` 等）。
 - 不得在分配器核心逻辑中使用原始 `new`/`delete`。
-- **原因**: 使用它们会触发系统的 `malloc`，而系统 `malloc` 已被 `am_malloc` Hook 拦截，将导致无限递归和栈溢出 (Stack Overflow)。
+- **原因**: 使用它们会退回到系统 `malloc`/`free`，把元数据分配暴露在分配器管理之外，破坏递归规避契约；若未来替换（拦截）系统符号，将直接导致无限递归和栈溢出 (Stack Overflow)。当前公共 API 为 `ammalloc::am_malloc`/`am_free`，并未 Hook 系统 `malloc`。
 - **解法**: 使用定长栈数组、嵌入式链表，或使用自定义的 `ObjectPool` 来分配元数据（如 `Span`、`RadixNode`）。
 
 ### 4.2 保持缓存局部性，避免伪共享
@@ -105,7 +107,7 @@ ammalloc/
 ### 4.4 保持并发契约与内存序
 
 - `PageMap::GetSpan` 的读取路径保持无锁。
-- 写入路径（`SetSpan`、`ClearRange`）保持受 `PageCache` 锁保护。
+- 写入路径（`SetSpan`、`ClearRange`）保持受所属 `PageCache` 分片锁保护。
 - 使用 `std::atomic` 时，**必须**明确指定内存序 (Memory Order)，禁止依赖默认的 `seq_cst`：
   - 对于不需要严格同步的计数器或提示变量，使用 `std::memory_order_relaxed`。
   - 对于发布/消费共享内存（如 RadixTree 节点挂载、Bitmap 状态修改），严格使用 `std::memory_order_acquire` 和 `std::memory_order_release`。
@@ -113,7 +115,7 @@ ammalloc/
 ### 4.5 基数树（PageMap）完整性
 
 - `PageMap` 是一个 4 层基数树，覆盖 48-bit（或通过胖根节点覆盖 57-bit）虚拟地址空间。
-- 读者 (`GetSpan`) 是**完全无锁**的；写者 (`SetSpan`、`ClearRange`) 受 `PageCache` 的互斥锁保护。
+- 读者 (`GetSpan`) 是**完全无锁**的；写者 (`SetSpan`、`ClearRange`) 受所属 `PageCache` 分片的互斥锁保护。
 - **绝对不要**显式 `delete` 或释放单个 `RadixNode`。树的结构只增不减，内存仅在系统完全关闭时通过 `ObjectPool::ReleaseMemory` 统一回收。
 
 ### 4.6 保持所有权模型
