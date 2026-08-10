@@ -11,7 +11,7 @@ Scope and precedence:
 
 - This document expands comment conventions used in this repository.
 - If this document conflicts with `AGENTS.md` or verified repository constraints, follow `AGENTS.md` and repository facts.
-- Examples that use STL containers are illustrative; subsystem-specific constraints still apply (for example, `ammalloc` code must follow `ammalloc/AGENTS.md` §4.1 and avoid heap-allocating STL containers).
+- Examples that use STL containers are illustrative; subsystem-specific constraints still apply (for example, `ammalloc` code must follow `AGENTS.md` §4.1 and avoid heap-allocating STL containers).
 
 ---
 
@@ -124,11 +124,11 @@ Placement relative to the include guard:
 Example:
 
 ```cpp
-// Copyright 2026 The AetherMind Authors
+// Copyright 2026 The ammalloc Authors
 // SPDX-License-Identifier: Apache-2.0
 
-#ifndef AETHERMIND_MODULE_FILE_H
-#define AETHERMIND_MODULE_FILE_H
+#ifndef AMMALLOC_MODULE_FILE_H
+#define AMMALLOC_MODULE_FILE_H
 
 /// @file file.h
 /// @brief One-line summary of the module.
@@ -136,7 +136,7 @@ Example:
 /// Optional longer description.
 #include "..."
 
-namespace aethermind { ... }
+namespace ammalloc { ... }
 #endif
 ```
 
@@ -548,8 +548,8 @@ When relevant, explain:
 Example:
 
 ```cpp
-// Evaluates `expr` exactly once and aborts in debug builds if it is false.
-#define AM_ASSERT(expr) ...
+// Evaluates `expr` exactly once and aborts when it is false.
+#define AMMALLOC_CHECK(expr) ...
 ```
 
 If a macro is trivial and local, do not over-document it.

@@ -1,6 +1,6 @@
 # 代码审查指南
 
-> AetherMind 项目系统化代码审查方法 - 风险分级驱动版
+> ammalloc 项目系统化代码审查方法 - 风险分级驱动版
 
 ---
 
@@ -46,10 +46,10 @@
 ```bash
 # 1. 编译检查
 rm -rf build && cmake -S . -B build -DBUILD_TESTS=ON
-make --build build --target aethermind_unit_tests -j$(nproc)
+make --build build --target ammalloc_unit_tests -j$(nproc)
 
 # 2. 单元测试（聚焦相关模块）
-./build/tests/unit/aethermind_unit_tests --gtest_filter="*SizeClass*:*Span*"
+./build/tests/unit/ammalloc_unit_tests --gtest_filter="*SizeClass*:*Span*"
 
 # 3. 格式化检查
 clang-format -n --Werror $(git diff --name-only main | grep -E '\.(h|cpp)$')
@@ -178,11 +178,11 @@ explicit Timeout(int ms);
 
 ```bash
 # 1. Benchmark 对比（与基线分支）
-./build/tests/benchmark/aethermind_benchmark --benchmark_filter="*Malloc*"
+./build/tests/benchmark/ammalloc_benchmarks --benchmark_filter="*Malloc*"
 # 要求：性能下降 < 5%
 
 # 2. Profiling（热点识别）
-perf record ./build/tests/unit/aethermind_unit_tests
+perf record ./build/tests/unit/ammalloc_unit_tests
 perf report
 
 # 3. Cache Miss 分析
@@ -209,15 +209,15 @@ cg_annotate cachegrind.out.*
 
 **所有级别必须检查**
 
-#### AetherMind 命名规范
+#### ammalloc 命名规范
 
 | 类型 | 规范 | 示例 |
 |------|------|------|
 | 类型 | PascalCase | `SizeClass`, `RadixNode` |
-| 函数（核心 API） | snake_case | `am_malloc`, `get_span` |
-| 函数（内部） | camelCase | `calculateIndex`, `allocObject` |
-| 枚举 | kPrefix | `kCPU`, `kCUDA` |
-| 宏 | AM_ + 大写下划线 | `AM_LIKELY`, `AM_CHECK` |
+| 函数（公共 API） | snake_case | `am_malloc`, `am_free` |
+| 函数（内部） | PascalCase | `AllocSpan`, `FetchRange` |
+| 常量 | kPrefix | `kMaxShardCount`, `kStepsPerGroup` |
+| 宏 | `AM_`/`AMMALLOC_` + 大写下划线 | `AM_LIKELY`, `AMMALLOC_CHECK` |
 | 私有成员 | 下划线后缀 | `size_table_`, `mutex_` |
 
 #### 现代 C++ 检查清单
@@ -253,7 +253,7 @@ if (!c) return;
 if (size > 32768) { ... }
 
 // ✅ Good: 命名常量
-constexpr size_t kMaxTcSize = 32 * 1024;
+constexpr size_t kMaxTcSize = SizeConfig::MAX_TC_SIZE;
 if (size > kMaxTcSize) { ... }
 ```
 
@@ -354,7 +354,7 @@ counter.load(std::memory_order_acquire);      // 获取数据
 
 ```bash
 # 线程安全检查
-./build-tsan/tests/unit/aethermind_unit_tests
+./build-tsan/tests/unit/ammalloc_unit_tests
 
 # 检查数据竞争报告
 # 要求：零数据竞争报告
@@ -420,7 +420,7 @@ gcovr --filter='ammalloc/' --html-details coverage.html
 |--------|----------|------|
 | **错误日志** | 关键路径有结构化日志 | `spdlog::error("malloc failed: {}", size)` |
 | **性能指标** | 可导出关键指标 | 分配速率、碎片率、缓存命中率 |
-| **调试信息** | 调试构建有详细检查 | `AM_DCHECK(ptr != nullptr)` |
+| **调试信息** | 调试构建有详细检查 | `AMMALLOC_DCHECK(ptr != nullptr)` |
 | **故障诊断** | 崩溃时可获取堆栈 | `libbacktrace` 集成 |
 
 #### 日志级别规范
@@ -501,10 +501,10 @@ var.load();
 ```bash
 # TSan 构建
 cmake -S . -B build-tsan -DENABLE_TSAN=ON
-make --build build-tsan --target aethermind_unit_tests -j
+make --build build-tsan --target ammalloc_unit_tests -j
 
 # 运行并发测试
-./build-tsan/tests/unit/aethermind_unit_tests --gtest_filter="*Thread*:*Concurrent*"
+./build-tsan/tests/unit/ammalloc_unit_tests --gtest_filter="*Thread*:*Concurrent*"
 
 # 要求：零数据竞争报告
 ```
@@ -521,8 +521,8 @@ TEST(ConcurrencyStress, DeadlockDetection) {
     for (int i = 0; i < kNumThreads; ++i) {
         threads.emplace_back([]() {
             for (int j = 0; j < kOpsPerThread; ++j) {
-                void* p = am_malloc(random_size());
-                am_free(p);
+                void* p = ammalloc::am_malloc(random_size());
+                ammalloc::am_free(p);
             }
         });
     }
@@ -576,12 +576,12 @@ TEST(Allocator, Fragmentation) {
     // 模拟真实负载
     std::vector<void*> ptrs;
     for (int i = 0; i < 10000; ++i) {
-        ptrs.push_back(am_malloc(random_size()));
+        ptrs.push_back(ammalloc::am_malloc(random_size()));
     }
     
     // 随机释放 50%
     for (size_t i = 0; i < ptrs.size(); i += 2) {
-        am_free(ptrs[i]);
+        ammalloc::am_free(ptrs[i]);
     }
     
     // 检查碎片率
@@ -595,7 +595,7 @@ TEST(Allocator, Fragmentation) {
 ```bash
 # Valgrind 检查
 valgrind --leak-check=full --show-leak-kinds=all \
-    ./build/tests/unit/aethermind_unit_tests
+    ./build/tests/unit/ammalloc_unit_tests
 
 # 要求：
 # - 无 definitely lost
@@ -687,8 +687,7 @@ Span* GetSpan(void* ptr) {
 **修复方案**:
 ```cpp
 // 明确所有权语义
-[[nodiscard]] ObjectPtr<Span> GetSpan(void* ptr);  // 转移所有权
-Span* GetSpanRaw(void* ptr);  // 借用，不拥有
+Span* GetSpan(void* ptr);  // 借用：调用者不得释放，Span 生命周期由所属分片的 ObjectPool 管理
 ```
 
 **教训**: API 必须明确所有权，使用智能指针或命名约定。
@@ -774,6 +773,6 @@ void* ThreadCache::Allocate(size_t size) {
 
 ---
 
-**适用范围**: AetherMind 项目  
+**适用范围**: ammalloc 项目  
 **维护者**: 开发团队  
 **更新频率**: 每季度审查更新

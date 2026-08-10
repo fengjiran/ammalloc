@@ -2,10 +2,10 @@
 
 Scope and precedence:
 
-- This document defines practical coding style guidance for AetherMind.
+- This document defines practical coding style guidance for ammalloc.
 - If this document conflicts with `AGENTS.md` or verified repository constraints, follow `AGENTS.md` and repository facts.
-- Product-scope constraints (for example, Phase 1 boundaries) are defined in `docs/products/aethermind_prd.md`.
-- Subsystem-specific constraints override generic guidance (for example, `ammalloc/AGENTS.md`).
+- Module-scope constraints are defined in `AGENTS.md` and the design documents under `docs/designs/`.
+- Module-specific constraints override generic guidance (for example, `AGENTS.md` §4).
 
 ## Goals
 
@@ -39,7 +39,7 @@ Optimize only when there is a concrete reason.
 - This repository uses C++20 (`CMAKE_CXX_STANDARD 20`).
 - Use newer language features only when they improve clarity, safety, or correctness.
 - Do not introduce modern features purely for style.
-- `std::expected` is optional and depends on toolchain support; use custom `Expected<T, E>` when unavailable (see `AGENTS.md`).
+- Do not rely on C++23 facilities (`std::expected` and similar); they are unavailable under this repository's C++20 standard.
 
 ------
 
@@ -205,10 +205,10 @@ for (auto it = values.begin(); it != end; ++it) {
 
 ### Preferred Tools
 
-- `ObjectPtr<T>` for intrusive reference-counted object ownership in project object model
-- `String` (project type) instead of `std::string` where project APIs require it
-- `std::unique_ptr` for exclusive ownership in non-intrusive ownership paths
-- `std::shared_ptr` only when shared lifetime is genuinely required and `ObjectPtr<T>` is not applicable
+- `ObjectPool` for owning metadata (`Span`, `RadixNode`) inside the allocator core (see `AGENTS.md` §4.1)
+- `std::unique_ptr` for exclusive ownership outside the core allocation path
+- `std::shared_ptr` only when shared lifetime is genuinely required
+- avoid `std::unique_ptr`/`std::shared_ptr` in the allocation hot path: they allocate via `new`/`delete`
 - raw pointer for nullable non-owning access
 - reference for non-null non-owning access
 
@@ -241,7 +241,7 @@ void attach(Session* session);  // non-owning, nullable
 ## Error Handling
 
 - Follow the project’s established error model consistently.
-- Prefer project macros for consistency: `AM_THROW`, `AM_CHECK`, `AM_DCHECK`, `AM_UNREACHABLE`.
+- Prefer project macros for invariant checks: `AMMALLOC_CHECK` (all builds), `AMMALLOC_DCHECK` (debug builds); see `include/ammalloc/assert.h`.
 - Use status/result-style returns only where the subsystem API already uses that contract.
 - Error paths must be readable and explicit.
 - Do not swallow errors silently.
@@ -258,10 +258,7 @@ if (!config.ok()) {
 Project-style example:
 
 ```cpp
-AM_CHECK(idx < size(), "index {} out of range {}", idx, size());
-if (bad_state) {
-    AM_THROW(ErrorKind::InvalidArgument) << "invalid runtime state";
-}
+AMMALLOC_CHECK(idx < size(), "index {} out of range {}", idx, size());
 ```
 
 ------
@@ -374,7 +371,7 @@ Examples:
 Note:
 
 - The STL guidance above is general and does not override subsystem constraints.
-- In `ammalloc`, avoid heap-allocating STL containers and regular heap `new`/`delete` to prevent allocator recursion; follow `ammalloc/AGENTS.md` and `AGENTS.md`.
+- In `ammalloc`, avoid heap-allocating STL containers and regular heap `new`/`delete` to prevent allocator recursion; follow `AGENTS.md` §4.1.
 
 ------
 

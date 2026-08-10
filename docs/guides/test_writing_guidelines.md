@@ -1,12 +1,12 @@
 # Test Writing Guidelines
 
-This document defines practical guidance for writing unit tests in AetherMind.
+This document defines practical guidance for writing unit tests in ammalloc.
 
 Scope and precedence:
 
 - This document expands test conventions used in this repository.
 - If this document conflicts with `AGENTS.md` or verified repository constraints, follow `AGENTS.md` and repository facts.
-- Subsystem-specific constraints override generic guidance (for example, `ammalloc/AGENTS.md`).
+- Module-specific constraints override generic guidance (for example, `AGENTS.md` §4).
 
 ---
 
@@ -27,33 +27,29 @@ Prefer clear, focused tests over exhaustive enumeration.
 ## 2. Test Framework and Build
 
 - Framework: GoogleTest (`GTest::gtest_main`).
-- Test target: `aethermind_unit_tests`.
-- Test sources are collected automatically via `GLOB_RECURSE` from `tests/unit/**/*.cpp` (see [tests/unit/CMakeLists.txt](file:///home/richard/project/AetherMind/tests/unit/CMakeLists.txt)). New test files are picked up without editing build config.
-- Benchmark target: `aethermind_benchmark` (Google Benchmark, see `tests/benchmark/`).
-- Run commands are documented in `AGENTS.md` §4.
+- Test target: `ammalloc_unit_tests`.
+- Test sources are collected automatically via `GLOB_RECURSE` from `tests/unit/**/*.cpp` (see [tests/unit/CMakeLists.txt](file:///home/richard/project/ammalloc/tests/unit/CMakeLists.txt)). New test files are picked up without editing build config.
+- Benchmark target: `ammalloc_benchmarks` (Google Benchmark, see `tests/benchmark/`).
+- Run commands are documented in `AGENTS.md` §9.
 
 ### 2.1 File Placement
 
-Place tests under `tests/unit/` mirroring the source layout:
+Place tests under `tests/unit/`, one `test_<module>.cpp` per module header:
 
-| Source path                         | Test path                              |
-| ----------------------------------- | -------------------------------------- |
-| `include/aethermind/graph/`         | `tests/unit/graph/`                    |
-| `src/graph/`                        | `tests/unit/graph/`                    |
-| `include/aethermind/model/`         | `tests/unit/model/`                    |
-| `src/model/`                        | `tests/unit/model/`                    |
-| `src/operators/`                    | `tests/unit/operators/`                |
-| `include/aethermind/execution/`     | `tests/unit/execution/`                |
-| `src/execution/`                    | `tests/unit/execution/`                |
-| `src/backend/cpu/kernels/`          | `tests/unit/backend/cpu/kernels/`      |
-| `ammalloc/src/`                     | `tests/unit/memory/`                   |
-| `src/container/`                    | `tests/unit/tensor/`                   |
+| Source header                        | Test file                             |
+| ------------------------------------ | ------------------------------------- |
+| `include/ammalloc/span.h`            | `tests/unit/test_span.cpp`            |
+| `include/ammalloc/size_class.h`      | `tests/unit/test_size_class.cpp`      |
+| `include/ammalloc/central_cache.h`   | `tests/unit/test_central_cache.cpp`   |
+| `include/ammalloc/page_cache.h`      | `tests/unit/test_page_cache.cpp`      |
+| `include/ammalloc/page_allocator.h`  | `tests/unit/test_page_allocator.cpp`  |
+| `include/ammalloc/thread_cache.h`    | `tests/unit/test_thread_cache.cpp`    |
 
-Name test files `test_<unit>.cpp` (for example `test_rmsnorm_op.cpp`).
+Name test files `test_<unit>.cpp` (for example `test_central_cache.cpp`).
 
 ### 2.2 File Size
 
-Keep test files focused. If a file exceeds ~800 lines or mixes many unrelated test suites, split it by logical group (see [test_string_*.cpp](file:///home/richard/project/AetherMind/tests/unit/tensor/test_string_accessors.cpp) as an example of splitting by responsibility).
+Keep test files focused. If a file exceeds ~800 lines or mixes many unrelated test suites, split it by logical group (for example, keep `test_size_class.cpp` and `test_central_cache.cpp` separate).
 
 ---
 
@@ -70,8 +66,8 @@ Group includes with blank lines, project headers first or gtest first (both styl
 Preferred style for new files:
 
 ```cpp
-#include "aethermind/graph/graph.h"          // project headers
-#include "test_graph_helpers.h"
+#include "ammalloc/central_cache.h"       // project headers
+#include "test_central_cache_helpers.h"
 
 #include <gtest/gtest.h>                    // third-party
 
@@ -86,18 +82,18 @@ Rationale: project headers come first so the compiler checks self-containment of
 Wrap test code in an anonymous namespace to avoid ODR clashes across translation units.
 
 ```cpp
-namespace aethermind {
+namespace ammalloc {
 namespace {
 
-using namespace aethermind;   // or only specific names
+using namespace ammalloc;   // or only specific names
 
 // ... tests ...
 
 }// namespace
-}// namespace aethermind
+}// namespace ammalloc
 ```
 
-For files that only need `using namespace aethermind;` at file scope (older style), keeping that is acceptable for consistency with neighbors.
+For files that only need `using namespace ammalloc;` at file scope (older style), keeping that is acceptable for consistency with neighbors.
 
 ---
 
@@ -112,44 +108,38 @@ For files that only need `using namespace aethermind;` at file scope (older styl
 Good:
 
 ```cpp
-TEST(RmsNormOp, ValidatesStaticInputContract) { ... }
-TEST(StringFrontBack, BasicFunctionality) { ... }
-TEST(TypeSystem, UnionType) { ... }
+TEST(SizeClassTest, RoundUp) { ... }
+TEST(SpanTest, DoubleFreeCorruption) { ... }
+TEST(ConfigTest, ParseSize) { ... }
 ```
 
 Bad (avoid):
 
 ```cpp
-TEST(rms_norm, test1) { ... }                 // snake_case, non-descriptive
-TEST(StringFind, Find2) { ... }               // numeric suffix
-TEST(TypeSystem, TestUnionType) { ... }       // redundant "Test" prefix
+TEST(page_cache, test1) { ... }             // snake_case, non-descriptive
+TEST(Span, Find2) { ... }                    // numeric suffix
+TEST(SizeClassTest, TestRoundUp) { ... }     // redundant "Test" prefix
 ```
 
 ### 4.2 Death Tests
 
-Suffix the test name with `Death` and assert the failure message emitted by `AM_CHECK`.
+Suffix the test name with `Death` and assert the failure message emitted by `AMMALLOC_CHECK`.
 
-`AM_CHECK` failures go through `HandleCheckFailed`, which prints `Check failed: ...` to stderr and calls `std::abort()`. Match the leading `Check failed` substring.
+`AMMALLOC_CHECK` failures go through `detail::HandleCheckFailed`, which prints `Check failed: ...` to stderr and calls `std::abort()`. Match the leading `Check failed` substring.
 
 ```cpp
-// front()/back() on an empty string triggers AM_CHECK(!empty()) which aborts.
-TEST(StringFrontBack, EmptyStringDeath) {
-    String empty;
-    EXPECT_DEATH(static_cast<void>(empty.front()), "Check failed");
-    EXPECT_DEATH(static_cast<void>(empty.back()), "Check failed");
+// AMMALLOC_CHECK evaluates the condition and aborts the process on failure.
+TEST(AssertTest, CheckFailureDeath) {
+    EXPECT_DEATH(AMMALLOC_CHECK(1 == 2, "intentional failure"), "Check failed");
 }
 ```
 
 Guard debug-only death tests with `#ifndef NDEBUG` so release builds do not execute them.
 
 ```cpp
-TEST(CharLayoutPolicyTest, CheckInvariantsRejectsInvalidCategory) {
-    Policy::Storage storage;
-    Policy::InitEmpty(storage);
-    WriteProbeByte(storage, config::kIsLittleEndian ? 0x40U : 0x01U);
-
+TEST(AssertTest, DebugOnlyCheckDeath) {
 #ifndef NDEBUG
-    EXPECT_DEATH(Policy::CheckInvariants(storage), "Check failed");
+    EXPECT_DEATH(AMMALLOC_DCHECK(1 == 2), "Check failed");
 #endif
 }
 ```
@@ -161,7 +151,7 @@ TEST(CharLayoutPolicyTest, CheckInvariantsRejectsInvalidCategory) {
 - `GTEST_SKIP()` is allowed only when the reason is environmental and unavoidable (missing hardware feature, symlink permission, overflow on a specific platform). Always include a reason string:
 
 ```cpp
-GTEST_SKIP() << "numel calculation overflowed";
+GTEST_SKIP() << "requires an unsupported platform feature";
 ```
 
 ---
@@ -173,7 +163,7 @@ GTEST_SKIP() << "numel calculation overflowed";
 Use `TEST` when no per-test setup is needed. This is the common case.
 
 ```cpp
-TEST(TensorTypeTest, BasicProperties) { ... }
+TEST(SizeClassTest, SmallObjectMapping) { ... }
 ```
 
 ### 5.2 TEST_F — Shared Setup/Teardown
@@ -183,21 +173,21 @@ Use `TEST_F` when multiple tests share expensive setup or need deterministic res
 Name the fixture `<Unit>Test` and keep `SetUp`/`TearDown` minimal.
 
 ```cpp
-class ThreadCacheTest : public ::testing::Test {
+class CentralCacheTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        central_cache_.Reset();
-        page_cache_.Reset();
+        CentralCache::GetInstance().Reset();
+        PageCache::GetInstance().Reset();
     }
     void TearDown() override {
-        central_cache_.Reset();
-        page_cache_.Reset();
+        CentralCache::GetInstance().Reset();
+        PageCache::GetInstance().Reset();
     }
     CentralCache& central_cache_ = CentralCache::GetInstance();
     PageCache&   page_cache_     = PageCache::GetInstance();
 };
 
-TEST_F(ThreadCacheTest, BasicAllocate) { ... }
+TEST_F(CentralCacheTest, BasicFetchRange) { ... }
 ```
 
 ### 5.3 TEST_P — Parameterized
@@ -205,20 +195,17 @@ TEST_F(ThreadCacheTest, BasicAllocate) { ... }
 Use `TEST_P` when the same scenario must be verified across many inputs and the inputs differ only in data, not in logic.
 
 ```cpp
-class HfConfigMissingRequiredFieldTest : public ::testing::TestWithParam<const char*> {};
+class BoundarySizeTest : public ::testing::TestWithParam<size_t> {};
 
-TEST_P(HfConfigMissingRequiredFieldTest, DefersMissingRequiredFieldToValidator) {
-    const auto* const missing_field = GetParam();
-    // ... write config without `missing_field`, expect validator to reject ...
+TEST_P(BoundarySizeTest, RoundTrip) {
+    const size_t size = GetParam();
+    EXPECT_GE(SizeClass::Size(SizeClass::Index(size)), size);
 }
 
 INSTANTIATE_TEST_SUITE_P(
-        RequiredFields,
-        HfConfigMissingRequiredFieldTest,
-        ::testing::Values("model_type", "hidden_size", /* ... */),
-        [](const ::testing::TestParamInfo<...>& info) {
-            return std::string(info.param);   // deterministic test name
-        });
+        SizeClassBoundaries,
+        BoundarySizeTest,
+        ::testing::Values(1, 8, 129, SizeConfig::MAX_TC_SIZE));
 ```
 
 Prefer `TEST_P` over copy-pasted `TEST` blocks when 3+ cases share a body.
@@ -230,15 +217,12 @@ Prefer `TEST_P` over copy-pasted `TEST` blocks when 3+ cases share a body.
 ### 6.1 EXPECT vs ASSERT
 
 - Use `EXPECT_*` by default. A failed `EXPECT` records the failure and continues, which surfaces multiple problems in one run.
-- Use `ASSERT_*` only when continuing would dereference a null/invalid value or crash. Typical cases: after `Status`/`Expected` checks that gate all later assertions.
+- Use `ASSERT_*` only when continuing would dereference a null/invalid value or crash. Typical cases: after null-checks that gate all later assertions.
 
 ```cpp
-auto reader = OpenTempDir(temp_dir);
-ASSERT_TRUE(reader.ok()) << reader.status().ToString();   // gates line below
-const auto config = reader->ParseConfig();
-ASSERT_TRUE(config.ok()) << config.status().ToString();
-
-EXPECT_EQ(config->model_type, "llama");                   // non-fatal
+Span* span = PageCache::GetInstance().AllocSpan(1);
+ASSERT_NE(span, nullptr);                  // gates line below
+EXPECT_EQ(span->page_num, 1);
 ```
 
 ### 6.2 Failure Messages
@@ -246,8 +230,8 @@ EXPECT_EQ(config->model_type, "llama");                   // non-fatal
 Add `<<` context to assertions whose raw values are unhelpful on failure (statuses, paths, opaque IDs).
 
 ```cpp
-ASSERT_TRUE(layout.ok()) << layout.status().ToString();
-EXPECT_EQ(buffer[kSize], 'x') << "kSize=" << kSize;
+ASSERT_NE(span, nullptr) << "page allocation failed";
+EXPECT_EQ(span->page_num, 1) << "span page count";
 ```
 
 ### 6.3 Floating Point
@@ -271,9 +255,8 @@ void ExpectClose(float actual, float expected, float rel_eps = 1.0e-3F) {
 Prefer `static_assert` inside a `TEST` body for type traits and `noexcept` contracts. This makes the check participate in the test report while still failing at compile time.
 
 ```cpp
-TEST(BasicStringCoreSwap, IsNoexceptWhenPolicySwapIsNoexcept) {
-    static_assert(noexcept(std::declval<DefaultCore&>().swap(std::declval<DefaultCore&>())));
-    static_assert(!noexcept(std::declval<ThrowingSwapCore&>().swap(std::declval<ThrowingSwapCore&>())));
+TEST(CentralCacheTest, ResetIsNoexcept) {
+    static_assert(noexcept(std::declval<CentralCache&>().Reset()));
 }
 ```
 
@@ -286,13 +269,8 @@ TEST(BasicStringCoreSwap, IsNoexceptWhenPolicySwapIsNoexcept) {
 Place file-local helpers in the anonymous namespace. Keep them `noexcept` when they only shuffle bytes.
 
 ```cpp
-std::uint8_t EncodedSmallProbe(Policy::SizeType size) noexcept {
-    const auto meta = Policy::EncodeSmallSizeToProbe(size);
-    if constexpr (config::kIsLittleEndian) {
-        return static_cast<std::uint8_t>(meta);
-    } else {
-        return static_cast<std::uint8_t>(meta << Policy::kCategoryBits);
-    }
+std::size_t RoundUpToClass(std::size_t size) noexcept {
+    return detail::AlignUp(size, 8);
 }
 ```
 
@@ -301,32 +279,27 @@ std::uint8_t EncodedSmallProbe(Policy::SizeType size) noexcept {
 When 3+ test files need the same builder, extract it into a header next to the tests (not into the public `include/` tree). Mark the function `inline` and document why it exists.
 
 ```cpp
-// tests/unit/graph/test_graph_helpers.h
-#ifndef AETHERMIND_GRAPH_TEST_GRAPH_HELPERS_H
-#define AETHERMIND_GRAPH_TEST_GRAPH_HELPERS_H
+// tests/unit/test_central_cache_helpers.h
+#ifndef AMMALLOC_TEST_CENTRAL_CACHE_HELPERS_H
+#define AMMALLOC_TEST_CENTRAL_CACHE_HELPERS_H
 
-#include "aethermind/shape_inference/tensor_spec.h"
+#include "ammalloc/central_cache.h"
+#include "ammalloc/page_cache.h"
 
-#include <cstdint>
-#include <vector>
-
-namespace aethermind {
-
-// Builds a fully-static TensorSpec from a dtype and concrete dims.
-// Shared by graph test files to avoid duplicating the helper.
-inline TensorSpec Spec(DataType dtype, std::vector<int64_t> shape) {
-    return TensorSpec{.dtype = dtype, .shape = SymbolicShape(IntArrayView(shape))};
+// Resets the global singleton caches before a test.
+// Shared by cache test files to avoid duplicating reset logic.
+inline void ResetAllocators() {
+    CentralCache::GetInstance().Reset();
+    PageCache::GetInstance().Reset();
 }
-
-}// namespace aethermind
 
 #endif
 ```
 
 Naming:
 
-- Builders that mirror a constructor may use the short name (e.g. `Spec`).
-- Builders that wrap logic should describe the result (e.g. `StaticShape`, `ActivationSpec`, `TokenSpec`).
+- Builders that mirror a constructor may use the short name (for example, `NewSpan`).
+- Builders that wrap logic should describe the result (for example, `ResetAllocators`, `RoundUpToClass`).
 
 ---
 
@@ -341,20 +314,17 @@ Each `TEST` should verify one behavior. If a test has 5 unrelated `EXPECT` block
 Prefer the AAA layout. Blank lines separate the phases. A short comment may introduce a non-obvious arrangement.
 
 ```cpp
-TEST(RmsNormOp, PreservesInputShapeAsOutputShape) {
+TEST(SizeClassTest, RoundTripContract) {
     // Arrange
-    const RmsNormOp op{RmsNormOp::Params{}};
-    const TensorSpec inputs[2] = {
-            TensorSpec{.dtype = DataType::Float32(), .shape = StaticShape({4, 8})},
-            TensorSpec{.dtype = DataType::Float32(), .shape = StaticShape({8})},
-    };
+    const size_t size = 129;
 
     // Act
-    const auto outputs = op.InferOutputSpecs(inputs);
+    const size_t idx = SizeClass::Index(size);
+    const size_t rounded = SizeClass::Size(idx);
 
     // Assert
-    ASSERT_TRUE(outputs.ok()) << outputs.status().ToString();
-    EXPECT_EQ(outputs->at(0).shape, inputs[0].shape);
+    EXPECT_GE(rounded, size);
+    EXPECT_EQ(SizeClass::Index(rounded), idx);
 }
 ```
 
@@ -389,25 +359,12 @@ if (!HasAvx2Support()) {
 }
 ```
 
-### 9.3 Model-Dependent Integration Tests
-
-Tests that load real model weights from `.models/` should:
-
-- Reference the path via the `AETHERMIND_TEST_MODELS_DIR` macro (defined in [tests/unit/CMakeLists.txt](file:///home/richard/project/AetherMind/tests/unit/CMakeLists.txt)).
-- Fail fast with `ASSERT_TRUE(ok)` if the fixture is missing, so the failure is clear rather than a mysterious null deref.
-
-```cpp
-fs::path TestModelDir() {
-    return fs::path(AETHERMIND_TEST_MODELS_DIR) / "tiny-random-LlamaForCausalLM";
-}
-```
-
 ---
 
 ## 10. Determinism and Isolation
 
 - Tests must not depend on execution order. Do not rely on global state mutated by an earlier test.
-- When a test touches a global singleton (cache, registry), reset it in `SetUp`/`TearDown` (see `ThreadCacheTest` above).
+- When a test touches a global singleton (cache, registry), reset it in `SetUp`/`TearDown` (see `CentralCacheTest` above).
 - Use fresh fixtures or local variables per test. Avoid sharing mutable state across tests in the same file.
 - For random data, seed the RNG explicitly (`std::mt19937 rng(42);`) so failures are reproducible.
 
@@ -423,14 +380,14 @@ Test the public contract of each module: inputs, outputs, documented error condi
 
 Always cover at minimum:
 
-- empty input (empty string, zero-size tensor, empty vector)
-- boundary sizes (SSO capacity boundary, max representable value)
-- invalid input that must be rejected (bad dtype, null pointer for non-empty size)
+- empty input (zero-size allocation, empty container)
+- boundary sizes (size-class boundary, max representable value)
+- invalid input that must be rejected (oversized request, null pointer for non-empty size)
 - idempotent operations applied twice
 
 ### 11.3 Error Paths
 
-Verify that invalid inputs produce the documented `Status` code or abort via `AM_CHECK` (death test). Do not let invalid input silently succeed.
+Verify that invalid inputs are rejected or abort via `AMMALLOC_CHECK` (death test). Do not let invalid input silently succeed.
 
 ### 11.4 What Not to Test
 
@@ -444,7 +401,7 @@ Verify that invalid inputs produce the documented `Status` code or abort via `AM
 
 Before submitting a new test file or suite, verify:
 
-- [ ] File is placed under the directory mirroring the source module.
+- [ ] File is named `test_<module>.cpp` and placed under `tests/unit/`.
 - [ ] Suite and test names are PascalCase and descriptive.
 - [ ] No `DISABLED_` prefix, no commented-out `GTEST_SKIP()`.
 - [ ] Each test verifies one behavior; AAA layout is clear.
