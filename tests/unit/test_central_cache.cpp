@@ -3,7 +3,6 @@
 //
 #include "ammalloc/central_cache.h"
 #include "ammalloc/page_cache.h"
-#include "aethermind/base/macros.h"
 
 #include <cstring>
 #include <gtest/gtest.h>

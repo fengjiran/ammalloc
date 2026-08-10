@@ -1,5 +1,4 @@
 //
-// Created by AetherMind Team on 2/16/26.
 // Performance Benchmark Tests for ammalloc using Google Benchmark
 //
 
@@ -7,6 +6,7 @@
 #include "ammalloc/config.h"
 
 #include <benchmark/benchmark.h>
+#include <array>
 #include <cstdlib>
 #include <random>
 #include <thread>
