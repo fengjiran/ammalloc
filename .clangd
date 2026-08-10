@@ -1,0 +1,97 @@
+CompileFlags:
+  Add: [-Wall, -Wextra, -Wpedantic, -Wno-c2y-extensions]
+
+Diagnostics:
+  ClangTidy:
+    Add:
+      - readability-identifier-naming
+      - bugprone-*
+      - performance-*
+      - modernize-*
+      - cppcoreguidelines-special-member-functions
+
+    Remove:
+      - modernize-use-trailing-return-type
+      - modernize-avoid-c-arrays
+      - cppcoreguidelines-avoid-c-arrays
+      - cppcoreguidelines-pro-bounds-array-to-pointer-decay
+      - readability-magic-numbers
+
+    # 如果觉得 clangd 漏掉了一些检查，可改成 Loose 或 None
+    # FastCheckFilter: Loose
+
+    CheckOptions:
+      # ---- variables: snake_case ----
+      readability-identifier-naming.VariableCase: lower_case
+      readability-identifier-naming.LocalVariableCase: lower_case
+      readability-identifier-naming.GlobalVariableCase: lower_case
+      readability-identifier-naming.ParameterCase: lower_case
+      readability-identifier-naming.NamespaceCase: lower_case
+      readability-identifier-naming.MemberCase: lower_case
+
+      # 可选：把 static 变量也显式钉住
+      readability-identifier-naming.StaticVariableCase: lower_case
+
+      # allow a few conventional short locals
+      readability-identifier-naming.LocalVariableIgnoredRegexp: '^(i|j|k|x|y|z|n|it|lhs|rhs)$'
+
+      # types / functions -> PascalCase
+      readability-identifier-naming.ClassCase: CamelCase
+      readability-identifier-naming.StructCase: CamelCase
+      readability-identifier-naming.UnionCase: CamelCase
+      readability-identifier-naming.EnumCase: CamelCase
+      readability-identifier-naming.TypedefCase: CamelCase
+      readability-identifier-naming.TypeAliasCase: CamelCase
+      readability-identifier-naming.FunctionCase: CamelCase
+      readability-identifier-naming.MethodCase: CamelCase
+      readability-identifier-naming.PublicMethodCase: CamelCase
+      readability-identifier-naming.PublicMethodIgnoredRegexp:
+      '^(size|data|mutable_data|capacity|empty|clear|begin|end|cbegin|cend|rbegin|rend|
+      front|back|max_size|reserve|shrink_to_fit|device|nbytes)$'
+
+      # enum members -> kPascalCase
+      readability-identifier-naming.EnumConstantPrefix: k
+      readability-identifier-naming.EnumConstantCase: CamelCase
+
+      # 如果大量使用 enum class，建议显式补齐
+      readability-identifier-naming.ScopedEnumConstantPrefix: k
+      readability-identifier-naming.ScopedEnumConstantCase: CamelCase
+
+      # public members -> snake_case, no suffix
+      # This covers aggregate-style struct fields.
+      readability-identifier-naming.PublicMemberCase: lower_case
+
+      # private/protected members -> snake_case_
+      readability-identifier-naming.PrivateMemberCase: lower_case
+      readability-identifier-naming.PrivateMemberSuffix: _
+      readability-identifier-naming.ProtectedMemberCase: lower_case
+      readability-identifier-naming.ProtectedMemberSuffix: _
+
+      # constants -> kPascalCase
+      readability-identifier-naming.GlobalConstantPrefix: k
+      readability-identifier-naming.GlobalConstantCase: CamelCase
+      readability-identifier-naming.StaticConstantPrefix: k
+      readability-identifier-naming.StaticConstantCase: CamelCase
+
+      # constexpr constants -> kPascalCase
+      readability-identifier-naming.ConstexprVariablePrefix: k
+      readability-identifier-naming.ConstexprVariableCase: CamelCase
+      readability-identifier-naming.GlobalConstexprVariablePrefix: k
+      readability-identifier-naming.GlobalConstexprVariableCase: CamelCase
+      readability-identifier-naming.StaticConstexprVariablePrefix: k
+      readability-identifier-naming.StaticConstexprVariableCase: CamelCase
+
+      # macros -> AM_UPPER_SNAKE_CASE
+      readability-identifier-naming.MacroDefinitionPrefix: AM_
+      readability-identifier-naming.MacroDefinitionCase: UPPER_CASE
+
+      cppcoreguidelines-special-member-functions.AllowSoleDefaultDtor: true
+
+  UnusedIncludes: Strict
+  # MissingIncludes: Strict
+
+  # 误报多时可按需补
+  # Includes:
+  #   IgnoreHeader:
+  #     - 'gtest/.*'
+  #     - 'spdlog/.*'
