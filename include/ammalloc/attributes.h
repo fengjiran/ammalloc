@@ -1,0 +1,65 @@
+#ifndef AMMALLOC_ATTRIBUTES_H
+#define AMMALLOC_ATTRIBUTES_H
+
+/// @file
+/// @brief Portable compiler attributes and builtin wrappers used by ammalloc.
+///
+/// This self-contained counterpart of `include/macros.h` keeps ammalloc's
+/// public headers independent of the AetherMind include tree for standalone
+/// builds and distribution.
+
+/// @brief Tests whether the compiler provides a named builtin.
+#ifdef __has_builtin
+#define AM_HAS_BUILTIN(...) __has_builtin(__VA_ARGS__)
+#else
+#define AM_HAS_BUILTIN(...) 0
+#endif
+
+/// @brief Tests whether the compiler provides a named C++ attribute.
+#ifdef __has_cpp_attribute
+#define AM_HAS_CPP_ATTRIBUTE(...) __has_cpp_attribute(__VA_ARGS__)
+#else
+#define AM_HAS_CPP_ATTRIBUTE(...) 0
+#endif
+
+/// @brief Emits a compiler prefetch hint when supported.
+#if AM_HAS_BUILTIN(__builtin_prefetch)
+#define AM_BUILTIN_PREFETCH(...) __builtin_prefetch(__VA_ARGS__)
+#else
+#define AM_BUILTIN_PREFETCH(...)
+#endif
+
+/// @brief Marks a return value as requiring caller consideration when supported.
+#if AM_HAS_CPP_ATTRIBUTE(nodiscard)
+#define AM_NODISCARD [[nodiscard]]
+#else
+#define AM_NODISCARD
+#endif
+
+/// @brief Marks a control-flow path as likely when supported.
+#if AM_HAS_CPP_ATTRIBUTE(likely)
+#define AM_LIKELY [[likely]]
+#else
+#define AM_LIKELY
+#endif
+
+/// @brief Marks a control-flow path as unlikely when supported.
+#if AM_HAS_CPP_ATTRIBUTE(unlikely)
+#define AM_UNLIKELY [[unlikely]]
+#else
+#define AM_UNLIKELY
+#endif
+
+/// @brief Provides portable no-inline and force-inline function annotations.
+#if defined(__GNUC__) || defined(__clang__)
+#define AM_NOINLINE __attribute__((noinline))
+#define AM_ALWAYS_INLINE __attribute__((always_inline)) inline
+#elif defined(_MSC_VER)
+#define AM_NOINLINE __declspec(noinline)
+#define AM_ALWAYS_INLINE __forceinline
+#else
+#define AM_NOINLINE
+#define AM_ALWAYS_INLINE inline
+#endif
+
+#endif// AMMALLOC_ATTRIBUTES_H
