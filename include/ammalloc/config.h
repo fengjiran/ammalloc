@@ -47,7 +47,7 @@ struct PageConfig {
     constexpr static size_t RADIX_ROOT_SIZE = 1 << RADIX_ROOT_BITS;
     constexpr static size_t RADIX_MASK = RADIX_NODE_SIZE - 1;
     constexpr static size_t MAX_ALLOC_RETRIES = 3;
-    static constexpr size_t HUGE_PAGE_CACHE_SIZE = 16;
+    constexpr static size_t HUGE_PAGE_CACHE_SIZE = 16;
 };
 
 /// @brief Process-wide runtime settings initialized from environment variables.
