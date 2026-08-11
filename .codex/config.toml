@@ -1,0 +1,46 @@
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+
+developer_instructions = """
+Use specialized subagents when delegation materially improves
+quality, speed, independent verification, or context isolation.
+
+Preferred workflow:
+
+- Simple implementation:
+  explorer -> worker
+
+- Normal feature:
+  explorer -> worker -> reviewer
+
+- Complex feature or refactor:
+  explorer -> planner -> worker -> reviewer
+
+- Architecture-heavy task:
+  explorer -> oracle -> planner -> worker -> reviewer
+
+- Difficult debugging:
+  explorer -> oracle -> worker -> reviewer
+
+Do not invoke every agent for every task.
+
+Prefer the least expensive capable agent:
+- explorer for repository navigation
+- worker for routine implementation
+- planner for implementation planning
+- oracle for difficult architecture and debugging
+- reviewer for independent verification
+
+Parallelize independent read-only work when useful.
+Avoid concurrent edits to overlapping files.
+"""
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 6
+default_subagent_model = "gpt-5.6-terra"
+default_subagent_reasoning_effort = "medium"
+
