@@ -339,10 +339,18 @@ consteval bool ValidateIndexInRangeSampled() {
         size_t class_size = SizeClass::Size(idx);
         if (idx > 0) {
             size_t prev_class = SizeClass::Size(idx - 1);
-            if (SizeClass::Index(prev_class) != idx - 1) return false;
-            if (SizeClass::Index(prev_class + 1) != idx) return false;
+            if (SizeClass::Index(prev_class) != idx - 1) {
+                return false;
+            }
+
+            if (SizeClass::Index(prev_class + 1) != idx) {
+                return false;
+            }
         }
-        if (SizeClass::Index(class_size) != idx) return false;
+
+        if (SizeClass::Index(class_size) != idx) {
+            return false;
+        }
     }
     return true;
 }
@@ -350,12 +358,16 @@ consteval bool ValidateIndexInRangeSampled() {
 consteval bool ValidateSizeNotLessThanInputSampled() {
     for (size_t idx = 0; idx < SizeClass::kNumSizeClasses; ++idx) {
         size_t class_size = SizeClass::Size(idx);
-        if (SizeClass::Size(SizeClass::Index(class_size)) != class_size) return false;
+        if (SizeClass::Size(SizeClass::Index(class_size)) != class_size) {
+            return false;
+        }
+
         if (idx > 0) {
             size_t prev_class = SizeClass::Size(idx - 1);
             // Interior sample: mid must not round down into the previous class.
-            size_t mid = (prev_class + class_size) / 2;
-            if (SizeClass::Size(SizeClass::Index(mid)) < mid) return false;
+            if (size_t mid = (prev_class + class_size) / 2; SizeClass::Size(SizeClass::Index(mid)) < mid) {
+                return false;
+            }
         }
     }
     return true;
@@ -373,7 +385,9 @@ consteval bool ValidateIndexIdempotentSampled() {
 
 consteval bool ValidateSizeMonotonic() {
     for (size_t idx = 1; idx < SizeClass::kNumSizeClasses; ++idx) {
-        if (SizeClass::Size(idx) <= SizeClass::Size(idx - 1)) return false;
+        if (SizeClass::Size(idx) <= SizeClass::Size(idx - 1)) {
+            return false;
+        }
     }
     return true;
 }
@@ -383,7 +397,9 @@ consteval bool ValidateRoundUpMonotonicSampled() {
     for (size_t idx = 0; idx < SizeClass::kNumSizeClasses; ++idx) {
         size_t class_size = SizeClass::Size(idx);
         size_t curr = SizeClass::RoundUp(class_size);
-        if (curr < prev) return false;
+        if (curr < prev) {
+            return false;
+        }
         prev = curr;
     }
     return true;
