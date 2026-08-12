@@ -21,7 +21,7 @@ public:
     /// @return Reference to the singleton stored without allocator recursion.
     static PageHeapScavenger& GetInstance() {
         alignas(alignof(PageHeapScavenger)) static char storage[sizeof(PageHeapScavenger)];
-        static PageHeapScavenger* instance = new (storage) PageHeapScavenger();
+        static auto* instance = new (storage) PageHeapScavenger();
         return *instance;
     }
 

@@ -91,7 +91,7 @@ TEST(CommonUtilsTest, AlignUp) {
 
 TEST(CommonUtilsTest, PtrToPageId) {
     if constexpr (SystemConfig::PAGE_SIZE == 4096) {
-        void* ptr1 = reinterpret_cast<void*>(0x0);
+        void* ptr1 = nullptr;
         EXPECT_EQ(detail::PtrToPageId(ptr1), 0);
 
         void* ptr2 = reinterpret_cast<void*>(0xFFF);// 4095, last byte of page 0
