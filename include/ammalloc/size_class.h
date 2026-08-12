@@ -242,11 +242,11 @@ public:
     static constexpr size_t kMaxBatchSize = 512;
 
 private:
-    AM_ALWAYS_INLINE static uint16_t BatchByIndex(size_t idx) noexcept {
+    AM_ALWAYS_INLINE static constexpr uint16_t BatchByIndex(size_t idx) noexcept {
         return batch_table_[idx];
     }
 
-    AM_ALWAYS_INLINE static uint16_t MovePagesByIndex(size_t idx) noexcept {
+    AM_ALWAYS_INLINE static constexpr uint16_t MovePagesByIndex(size_t idx) noexcept {
         return move_page_table_[idx];
     }
 
@@ -320,6 +320,8 @@ static_assert(SizeClass::Index(150) == 16);
 
 static_assert(SizeClass::Index(0) == 0);
 static_assert(SizeClass::RoundUp(0) == 8);
+static_assert(SizeClass::CalculateBatchSize(8) == SizeClass::kMaxBatchSize);
+static_assert(SizeClass::GetMovePageNum(8) > 0);
 static_assert(SizeClass::kNumSizeClasses <= std::numeric_limits<uint8_t>::max());
 
 // MAX_TC_SIZE must be a power of two to land exactly on a size class boundary.
