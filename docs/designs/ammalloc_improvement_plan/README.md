@@ -1,4 +1,4 @@
-# ammalloc 全面提升与演进方案
+﻿# ammalloc 全面提升与演进方案
 
 > 文档状态：规划草案  
 > 适用范围：ammalloc 核心分配器、系统分配接口、测试基准及 aethermind 集成  
@@ -12,33 +12,33 @@ ammalloc 现有的 `ThreadCache -> CentralCache -> PageCache -> PageAllocator` �
 
 1. correctness、ownership/lifetime、自举和 ABI；
 2. 并发扩展、内存碎片、RSS 与可观测性；
-3. NUMA、hugepage、安全和 aethermind 专用能力；
+3. NUMA、hugepage、安全和 大模型推理引擎专用能力；
 4. 可复现测试、发布、灰度和回滚。
 
 正确性门禁不得被性能目标绕过。所有性能结论必须基于机制分析和可复现实验，并守住项目当前基线：单线程 Fast Path 约 3.8 ns、随机大小约 26.0 ns、16 线程 64B 极高压竞争约 8.9 µs / 100+ GiB/s。
 
 ## 完整目录
 
-| 阅读序号 | 章节 | 专题 | 主要风险 |
-|---:|---:|---|---|
-| 01 | 1–2 | [总体结论与产品定位](01-overview-and-positioning.md) | 架构、产品边界 |
-| 02 | 3 | [目标架构](02-target-architecture.md) | 架构、兼容性 |
-| 03 | 4 | [正确性、自举与 ABI](03-correctness-bootstrap-and-abi.md) | 正确性、内存、兼容性 |
-| 04 | 5 | [PageMap 与 Span 生命周期](04-pagemap-and-span-lifecycle.md) | 正确性、并发、内存 |
-| 05 | 6 | [Frontend 提升](05-frontend.md) | 性能、并发、生命周期 |
-| 06 | 7 | [Middle-end 提升](06-middle-end.md) | 并发、性能、内存 |
-| 07 | 8 | [Backend、PageCache 与大对象管理](07-backend-pagecache-large-object.md) | 正确性、并发、内存、性能 |
-| 08 | 9 | [RSS、碎片与后台回收](08-rss-fragmentation-and-scavenging.md) | 内存、性能、运维 |
-| 09 | 10 | [NUMA 与 aethermind 集成](09-numa-and-aethermind.md) | 架构、性能、兼容性 |
-| 10 | 11 | [可观测性与 Profiling](10-observability-and-profiling.md) | 性能、自举、运维 |
-| 11 | 12 | [安全加固](11-security-hardening.md) | 安全、正确性、性能 |
-| 12 | 13 | [测试与验证体系](12-testing-and-validation.md) | 正确性、工程、性能测量 |
-| 13 | 14 | [工程化与发布](13-engineering-and-release.md) | ABI、工程、运维 |
-| 14 | 15 | [分阶段实施路线图](14-implementation-roadmap.md) | 依赖、交付、风险控制 |
-| 15 | 16 | [优先级与风险矩阵](15-priority-and-risk-matrix.md) | 项目治理、风险 |
-| 16 | 17 | [关键实施原则](16-implementation-principles.md) | 跨模块 invariant |
-| 17 | 18 | [参考资料](17-references.md) | 事实与决策依据 |
-| 18 | 19 | [最终建议](18-final-recommendations.md) | 里程碑、终态判断 |
+| 序号 | 专题 | 主要风险 |
+|---:|:---|---|
+| 01 | [总体结论与产品定位](01-overview-and-positioning.md) | 架构、产品边界 |
+| 02 | [目标架构](02-target-architecture.md) | 架构、兼容性 |
+| 03 | [正确性、自举与 ABI](03-correctness-bootstrap-and-abi.md) | 正确性、内存、兼容性 |
+| 04 | [PageMap 与 Span 生命周期](04-pagemap-and-span-lifecycle.md) | 正确性、并发、内存 |
+| 05 | [Frontend 提升](05-frontend.md) | 性能、并发、生命周期 |
+| 06 | [Middle-end 提升](06-middle-end.md) | 并发、性能、内存 |
+| 07 | [Backend、PageCache 与大对象管理](07-backend-pagecache-large-object.md) | 正确性、并发、内存、性能 |
+| 08 | [RSS、碎片与后台回收](08-rss-fragmentation-and-scavenging.md) | 内存、性能、运维 |
+| 09 | [NUMA 与 aethermind 集成](09-numa-and-aethermind.md) | 架构、性能、兼容性 |
+| 10 | [可观测性与 Profiling](10-observability-and-profiling.md) | 性能、自举、运维 |
+| 11 | [安全加固](11-security-hardening.md) | 安全、正确性、性能 |
+| 12 | [测试与验证体系](12-testing-and-validation.md) | 正确性、工程、性能测量 |
+| 13 | [工程化与发布](13-engineering-and-release.md) | ABI、工程、运维 |
+| 14 | [分阶段实施路线图](14-implementation-roadmap.md) | 依赖、交付、风险控制 |
+| 15 | [优先级与风险矩阵](15-priority-and-risk-matrix.md) | 项目治理、风险 |
+| 16 | [关键实施原则](16-implementation-principles.md) | 跨模块 invariant |
+| 17 | [参考资料](17-references.md) | 事实与决策依据 |
+| 18 | [最终建议](18-final-recommendations.md) | 里程碑、终态判断 |
 
 ## 推荐阅读路径
 
@@ -54,7 +54,7 @@ ammalloc 现有的 `ThreadCache -> CentralCache -> PageCache -> PageAllocator` �
 
 [正确性、自举与 ABI](03-correctness-bootstrap-and-abi.md) → [可观测性](10-observability-and-profiling.md) → [测试与验证](12-testing-and-validation.md) → [工程化与发布](13-engineering-and-release.md)
 
-### aethermind 集成
+### 大模型推理引擎 aethermind 集成
 
 [目标架构](02-target-architecture.md) → [Backend](07-backend-pagecache-large-object.md) → [NUMA 与 aethermind](09-numa-and-aethermind.md) → [可观测性](10-observability-and-profiling.md) → [实施路线图](14-implementation-roadmap.md)
 
