@@ -71,7 +71,7 @@ TEST_F(ThreadCacheTest, BasicDeallocate) {
 TEST_F(ThreadCacheTest, EdgeCases) {
     thread_local ThreadCache tc;
 
-    // 1. size == 0 (应该被提升为最小的 8 字节桶)
+    // 1. size == 0 (应该被提升为最小桶)
     void* ptr_zero = tc.Allocate(SizeClass::RoundUp(0));
     EXPECT_TRUE(ptr_zero != nullptr);
     tc.Deallocate(ptr_zero, SizeClass::RoundUp(0));
@@ -420,7 +420,7 @@ TEST_F(ThreadCacheTest, MultiThreadedDifferentSizes) {
     EXPECT_EQ(success_count.load(), num_threads * allocations_per_thread);
 }
 
-// 测试点 12: 小对象分配 (8 字节)
+// 测试点 12: 最小类分配 (8 字节请求)
 TEST_F(ThreadCacheTest, SmallObjectAllocation) {
     thread_local ThreadCache cache;
     constexpr size_t size = SizeClass::RoundUp(8);

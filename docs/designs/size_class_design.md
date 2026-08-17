@@ -26,7 +26,7 @@
 ### 1.3 设计参考
 
 本设计基于 **Google TCMalloc** 的尺寸分级策略：
-- 小对象（≤128B）：线性映射，8字节对齐
+- 小对象（≤128B）：线性映射，按 `SystemConfig::ALIGNMENT`（默认 16B）对齐
 - 大对象（>128B）：对数步进，每 2^k 区间分成 4 步
 
 ---
@@ -41,7 +41,7 @@ size的分级策略如下，主要分为三个阶段：边界防御、线性映�
 ├──────────────┬─────────────────┬────────────┬───────────────┤
 │   范围       │    对齐粒度      │   桶数量   │    索引计算   │
 ├──────────────┼─────────────────┼────────────┼───────────────┤
-|  1-128 B     │     8 B         │    16      │  (size-1)>>3  │
+|  1-128 B     │   ALIGNMENT      │  128/ALIGNMENT │  (size-1)>>kAlignShift │
 │  129-256 B   │    32 B         │     4      │  数学计算     │
 │  257-512 B   │    64 B         │     4      │  数学计算     │
 │  513-1024 B  │   128 B         │     4      │  数学计算     │
@@ -57,7 +57,7 @@ if (size > SizeConfig::MAX_TC_SIZE) return std::numeric_limits<size_t>::max();
 ```
 
 * **`size == 0`**：当前实现采用**分层语义**，而不是统一按非法输入处理：
-  * 映射接口：`Index(0) -> 0`，`RoundUp(0) -> 8`
+  * 映射接口：`Index(0) -> 0`，`RoundUp(0) -> ALIGNMENT (16)`
   * 策略接口：`CalculateBatchSize(0) -> 0`，`GetMovePageNum(0) -> 0`
   * 这样既支持上层 `malloc(0)` 风格语义，又避免 batch/page 策略对零尺寸做无意义计算。
 * **越界检查**：超过 `ThreadCache` 阈值的直接交由 `PageCache` 处理。
@@ -66,19 +66,19 @@ if (size > SizeConfig::MAX_TC_SIZE) return std::numeric_limits<size_t>::max();
 
 ```cpp
 if (size <= 128) {
-    return (size - 1) >> 3;
+    return (size - 1) >> kAlignShift;  // kAlignShift = countr_zero(ALIGNMENT)，默认 4
 }
 ```
 
-对于极小对象，底层公式采用 **8 字节固定步长**。
+对于极小对象，底层公式采用 **`SystemConfig::ALIGNMENT` 固定步长**（默认 16B，由 `alignof(std::max_align_t)` 推导）。
 
-* **为什么是 `size - 1`？**：这是对齐算法的精髓。如果 `size = 8`，`(8-1)>>3 = 0`（落入第 0 号桶：8B）。如果不用 `size-1`，`8>>3 = 1`，就会错误地落入第 1 号桶（16B）。
-* **桶范围**：Index `[0, 15]`，对应容量 `[8B, 16B, ..., 128B]`。
-* **实现注意**：这里描述的是 `details::CalculateIndex()` 的线性映射段。`SizeClass::Index()` 在工程实现上对 `[0, kSmallSizeThreshold]` 使用查表优化；当前 `kSmallSizeThreshold = 1024`。
+* **为什么是 `size - 1`？**：这是对齐算法的精髓。如果 `size = 16`，`(16-1)>>4 = 0`（落入第 0 号桶：16B）。如果不用 `size-1`，`16>>4 = 1`，就会错误地落入第 1 号桶（32B）。
+* **桶范围**：Index `[0, 7]`，对应容量 `[16B, 32B, ..., 128B]`（步长与桶数由 `ALIGNMENT` 推导：桶数 = 128 / ALIGNMENT）。
+* **实现注意**：这里描述的是 `detail::CalculateIndex()` 的线性映射段。`SizeClass::Index()` 在工程实现上对 `[0, kSmallSizeThreshold]` 使用查表优化；当前 `kSmallSizeThreshold = 1024`。
 
-- **内部碎片**: 最大 7/8 = 12.5%
+- **内部碎片**: 最坏单点碎片率 15/16 = 93.75%（1B 请求映射 16B 桶）；[1,128] 均匀分布下累计浪费/累计分配 ≈ 10.42%（换来全平台对齐契约）
 
-- **优点**: 计算简单，O(1)，分支预测友好
+- **优点**: 计算简单，O(1)，分支预测友好；所有类大小都是 ALIGNMENT 的倍数
 
 ### 2.3 对数阶梯映射区 (> 128 Bytes)
 
@@ -90,22 +90,22 @@ if (size <= 128) {
 
 ```cpp
 int msb = std::bit_width(size - 1) - 1;
-int group_idx = msb - 7;
+int group_idx = msb - static_cast<int>(kLinearMsb);
 ```
 
 * `std::bit_width(x)` 返回表示 `x` 所需的最小位数（底层编译为 `BSR` 或 `LZCNT` 硬件指令，1 个时钟周期完成）。
 * **`msb` (最高有效位)**：例如 `size = 129`，`size-1 = 128` (二进制 `10000000`)，`bit_width = 8`，`msb = 7`。
-* **`- 7` 的含义**：因为线性区处理到了 128 字节（$2^7$）。所以大于 128 的第一个组，其 `msb` 必然是 7。减去 7 就是为了让 `group_idx` 从 `0` 开始。
+* **`- kLinearMsb` 的含义**：因为线性区处理到了 128 字节（$2^7$），所以大于 128 的第一个组，其 `msb` 必然是 7。`kLinearMsb = countr_zero(kSmallLinearLimit) = 7`（对 2 的幂求指数，由 `static_assert(has_single_bit(kSmallLinearLimit))` 保证精确）。减去它就是让 `group_idx` 从 `0` 开始。
   * Group 0: 129B ~ 256B (`msb=7`)
   * Group 1: 257B ~ 512B (`msb=8`)
 
 **步骤 B：计算该组的起始桶下标 (`base_idx`)**
 
 ```cpp
-size_t base_idx = 16 + (group_idx << SizeConfig::kStepShift);
+size_t base_idx = kLinearBucketCount + (group_idx << SizeConfig::kStepShift);
 ```
 
-* **`16`**：因为前面的线性区已经占用了 `0~15` 号桶，所以大对象的桶从 `16` 开始。
+* **`kLinearBucketCount`（默认 8）**：因为线性区占用了 `0~7` 号桶，所以大对象的桶从 `kLinearBucketCount` 开始（桶数 = 128 / ALIGNMENT）。
 * **`<< kStepShift` (即乘以 4)**：因为每个 Group 内被划分成了 4 个阶梯（桶），所以每跨越一个 Group，基础下标就要增加 4。
 
 **步骤 C：计算组内的步长 (`shift`)**
@@ -138,22 +138,30 @@ return base_idx + group_offset;
 
 1. **边界与线性区**：`320 > 128`，进入阶梯映射区。
 2. **算 `msb`**：`size - 1 = 319` (二进制 `1 0011 1111`)。`bit_width = 9`，`msb = 8`。
-3. **算 `group_idx`**：`msb - 7 = 8 - 7 = 1`。（属于 Group 1：256B ~ 512B）。
-4. **算 `base_idx`**：`16 + (1 << 2) = 16 + 4 = 20`。（Group 1 的桶从 20 开始）。
+3. **算 `group_idx`**：`msb - kLinearMsb = 8 - 7 = 1`。（属于 Group 1：256B ~ 512B）。
+4. **算 `base_idx`**：`kLinearBucketCount + (1 << 2) = 8 + 4 = 12`。（Group 1 的桶从 12 开始）。
 5. **算 `shift`**：`msb - 2 = 8 - 2 = 6`。（步长为 $2^6 = 64$ 字节）。
 6. **算 `offset`**：`(319 >> 6) & 3 = 4 & 3 = 0`。
-7. **结果**：`base_idx + offset = 20 + 0 = 20`。
+7. **结果**：`base_idx + offset = 12 + 0 = 12`。
 
-**反向验证**：第 20 号桶的容量 = 基准 256B + (0 + 1) * 64B = **320B**。完美契合！
+**反向验证**：第 12 号桶的容量 = 基准 256B + (0 + 1) * 64B = **320B**。完美契合！
 
 ### 2.4 内部碎片分析
 
 #### 小对象（≤128B）
 
 ```
-最大内部碎片 = 对齐粒度 - 1 = 7B
-相对碎片率 = 7 / 8 = 12.5%
+最大绝对浪费 = 对齐粒度 - 1 = 15B
+
+最坏相对碎片率（浪费 / 分配量）= 15 / 16 = 93.75%
+  - 请求 1B 映射 16B 桶：浪费 15B，浪费/分配量 = 15/16 = 93.75%
+  - 请求 17B 映射 32B 桶：浪费 15B，浪费/请求量 = 15/17 ≈ 88.24%
+
+若请求尺寸在 [1, 128] 均匀分布：
+  累计浪费 / 累计分配 = (Σclass - Σreq) / Σclass ≈ 10.42%
 ```
+
+**说明**：单点最坏碎片率高达 93.75%，但只发生在 1B 请求映射 16B 桶时；"12.5%" 是 FragmentationAnalysis 全范围（1~32768）统计测试的累计碎片率上限，不能称为 16B 线性区的最大相对碎片率。
 
 #### 大对象（>128B）
 
@@ -176,8 +184,8 @@ return base_idx + group_offset;
 ### 3.1 类层次结构
 
 ```
-namespace aethermind {
-    namespace details {
+namespace ammalloc {
+    namespace detail {
         // 内部计算函数
         constexpr size_t CalculateIndex(size_t size) noexcept;
         constexpr size_t CalculateSize(size_t idx) noexcept;
@@ -209,7 +217,7 @@ namespace aethermind {
 
 | 层级 | 职责 | 理由 |
 |------|------|------|
-| `details::` | 数学计算 | 分离算法实现，便于测试和验证 |
+| `detail::` | 数学计算 | 分离算法实现，便于测试和验证 |
 | `SizeClass::` | 公共接口 + 优化 | 封装实现细节，提供优化后的访问 |
 | 编译期表 | 运行时加速 | 用空间换时间，热路径 O(1) |
 
@@ -220,7 +228,7 @@ SizeClass::Index(size)
     │
     ├── [size ≤ 1024B] AM_LIKELY ─→ 查表 small_index_table_[size] ──→ O(1)
     │
-    └── [size > 1024B] ───────────→ 计算 details::CalculateIndex(size) ──→ O(1)
+    └── [size > 1024B] ───────────→ 计算 detail::CalculateIndex(size) ──→ O(1)
 ```
 
 **设计决策**:
@@ -238,7 +246,7 @@ SizeClass::Index(size)
 constexpr static auto size_table_ = []() consteval {
     std::array<uint32_t, kNumSizeClasses> size_table{};
     for (size_t idx = 0; idx < kNumSizeClasses; ++idx) {
-        size_table[idx] = static_cast<uint32_t>(details::CalculateSize(idx));
+        size_table[idx] = static_cast<uint32_t>(detail::CalculateSize(idx));
     }
     return size_table;
 }();
@@ -260,7 +268,7 @@ static constexpr size_t Index(size_t size) noexcept {
     if (size <= SizeConfig::kSmallSizeThreshold) AM_LIKELY {
         return small_index_table_[size]; // O(1) 查表
     }
-    return details::CalculateIndex(size); // 慢速路径算术
+    return detail::CalculateIndex(size); // 慢速路径算术
 }
 ```
 
@@ -280,7 +288,7 @@ AM_ALWAYS_INLINE constexpr static size_t Index(size_t size) noexcept {
         return small_index_table_[size];
     }
     
-    return details::CalculateIndex(size);
+    return detail::CalculateIndex(size);
 }
 ```
 
@@ -336,7 +344,7 @@ for each size class idx:
 这意味着 **129B 和 160B 这类落入同一 class 的请求，会得到同样的 batch size**。
 
 **示例**:
-- 8B 对象: 32768 / 8 = 4096 → clamp 到 512
+- 16B 对象: 32768 / 16 = 2048 → clamp 到 512
 - 1KB 对象: 32768 / 1024 = 32
 - 32KB 对象: 32768 / 32768 = 1 → 提升到 2
 
@@ -375,20 +383,21 @@ for each size class idx:
 
 ```cpp
 // 验证小对象边界
-static_assert(details::CalculateSize(0) == 8);
-static_assert(details::CalculateSize(15) == 128);
+static_assert(detail::CalculateSize(0) == SystemConfig::ALIGNMENT);
+static_assert(detail::CalculateSize(detail::kLinearBucketCount - 1) == 128);
 
 // 验证大对象第 0 组
-static_assert(details::CalculateSize(16) == 160);  // 128 + 32
-static_assert(details::CalculateSize(17) == 192);  // 160 + 32
-static_assert(details::CalculateSize(19) == 256);  // 组边界
+static_assert(detail::CalculateSize(detail::kLinearBucketCount) == 160);    // 128 + 32
+static_assert(detail::CalculateSize(detail::kLinearBucketCount + 1) == 192);// 160 + 32
+static_assert(detail::CalculateSize(detail::kLinearBucketCount + 3) == 256);// 组边界
 
 // 验证互逆性（近似）
-static_assert(details::CalculateIndex(129) == 16);
-static_assert(details::CalculateIndex(160) == 16);  // 同桶
+static_assert(detail::CalculateIndex(129) == detail::kLinearBucketCount);
+static_assert(detail::CalculateIndex(160) == detail::kLinearBucketCount);  // 同桶
 
 // Round-trip 检查
-static_assert(SizeClass::Index(SizeClass::Size(20)) == 20);
+static_assert(SizeClass::Index(SizeClass::Size(detail::kLinearBucketCount + 4)) ==
+              detail::kLinearBucketCount + 4);
 
 // 关键边界约束
 static_assert(std::has_single_bit(SizeConfig::MAX_TC_SIZE));
@@ -455,12 +464,12 @@ TEST(SizeClassTest, FragmentationAnalysis) {
 
 ```cpp
 // 获取尺寸的桶索引
-size_t idx = SizeClass::Index(100);     // idx = 12
-size_t idx = SizeClass::Index(200);     // idx = 18
+size_t idx = SizeClass::Index(100);     // idx = 6  (线性区：100 → 112B 桶)
+size_t idx = SizeClass::Index(200);     // idx = 10 (几何区：200 → 224B 桶)
 
 // 获取桶的最大尺寸
-size_t size = SizeClass::Size(12);      // size = 104
-size_t size = SizeClass::Size(18);      // size = 192
+size_t size = SizeClass::Size(12);      // size = 320 (组 1 第一桶)
+size_t size = SizeClass::Size(18);      // size = 896 (组 2 第三桶)
 
 // 向上取整到桶尺寸
 size_t aligned = SizeClass::RoundUp(150);  // aligned = 160
@@ -501,16 +510,16 @@ Span* CentralCache::GetOneSpan(size_t class_size) {
 
 ## 8. 关键设计决策
 
-### 8.1 为什么使用 8 字节对齐（小对象）？
+### 8.1 为什么使用 ALIGNMENT（16 字节）对齐小对象？
 
-- **硬件原因**: x86-64 架构的最小对齐要求
-- **内存效率**: 8 字节是 `void*` 的大小，覆盖大多数小对象
-- **碎片平衡**: 12.5% 的最大碎片是可接受的
+- **契约一致性**: 小对象步长绑定 `SystemConfig::ALIGNMENT = alignof(std::max_align_t)`，所有类大小都是 ALIGNMENT 的倍数，每个分配对象都满足平台 ABI 对齐契约（`malloc`/`operator new` 兼容）
+- **平台自适应**: 若未来平台 `max_align_t = 8`，类表自动恢复 8 字节步长（在该平台完全合规），无需人工同步
+- **碎片平衡**: 全范围累计碎片率 ~12.5% 上限可接受（最坏单点 93.75% 仅出现在 1B 请求，换取对齐保证）
 
 ### 8.2 为什么大对象使用 4 步/组？
 
 - **碎片控制**: 4 步/组将最坏相对碎片率控制在约 25% 量级，平均碎片明显更低
-- **桶数量控制**: 32KB 范围当前只需 48 个桶
+- **桶数量控制**: 32KB 范围当前只需 40 个桶
 - **计算简单**: 4 步 = 2^2，位运算友好
 
 ### 8.3 为什么小对象用查表，大对象用计算？
@@ -525,7 +534,7 @@ Span* CentralCache::GetOneSpan(size_t class_size) {
 
 ### 8.4 为什么 batch size 近似反比于对象所属 class 的大小？
 
-- **小对象**: 传输 512 个 8B 对象 = 4KB，摊销锁开销
+- **小对象**: 传输 512 个 16B 对象 = 8KB，摊销锁开销
 - **大对象**: 传输 2 个 16KB 对象 = 32KB，防止 ThreadCache 囤积
 - **内存平衡**: ThreadCache 总占用约 32KB-64KB
 
@@ -547,9 +556,9 @@ Span* CentralCache::GetOneSpan(size_t class_size) {
 | 表 | 大小 | 说明 |
 |----|------|------|
 | `small_index_table_` | 1025 bytes | size 0-1024 的索引 |
-| `size_table_` | 48 × 4 bytes | index -> class size |
-| `batch_table_` | 48 × 2 bytes | index -> batch size |
-| `move_page_table_` | 48 × 2 bytes | index -> page count |
+| `size_table_` | 40 × 4 bytes | index -> class size |
+| `batch_table_` | 40 × 2 bytes | index -> batch size |
+| `move_page_table_` | 40 × 2 bytes | index -> page count |
 | **总计** | **约 1.4 KB** | 代码段，只读 |
 
 ### 9.3 缓存行为
@@ -564,12 +573,16 @@ Span* CentralCache::GetOneSpan(size_t class_size) {
 
 ### 10.1 修改对齐粒度
 
-如果要改为 16 字节对齐：
+对齐粒度已由 `SystemConfig::ALIGNMENT = alignof(std::max_align_t)` 统一驱动：
 
 ```cpp
-// 修改 kSmallSizeThreshold 相关的计算
-// 桶数量从 16 变为 8
-// 需要重新生成 static_assert 验证
+// 线性区步长与桶数、大对象组起始下标全部由 ALIGNMENT 推导，
+// 修改 ALIGNMENT 后 static_assert 与测试自动验证新类表。
+// 编译期强制约束（static_assert）：
+//   - kSmallLinearLimit % ALIGNMENT == 0        （线性区桶数为整数）
+//   - (kSmallLinearLimit >> kStepShift) % ALIGNMENT == 0  （最小几何步长对齐）
+//   - kStepsPerGroup == 1 << kStepShift         （桶掩码精确）
+// 并遍历全部类验证 Size(idx) % ALIGNMENT == 0
 ```
 
 ### 10.2 支持更大尺寸
@@ -587,7 +600,8 @@ Span* CentralCache::GetOneSpan(size_t class_size) {
 如果要改为 8 步/组（更细粒度）：
 
 ```cpp
-// 修改 kStepShift = 3
+// 修改 kStepShift = 3 并同步 kStepsPerGroup = 8
+// （kStepsPerGroup == 1 << kStepShift 由 static_assert 强制）
 // 桶数量增加，碎片降低
 // 需要权衡 ThreadCache 内存
 ```
@@ -603,7 +617,7 @@ Span* CentralCache::GetOneSpan(size_t class_size) {
 
 ---
 
-**文档版本**: 2.1  
-**最后更新**: 2026-03-24  
+**文档版本**: 2.2  
+**最后更新**: 2026-08-18  
 **设计状态**: 已实施并验证  
 **相关文件**: `ammalloc/include/ammalloc/size_class.h`

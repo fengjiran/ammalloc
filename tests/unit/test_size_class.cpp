@@ -6,35 +6,39 @@
 namespace {
 using namespace ammalloc;
 
+// Linear-region bucket count: [1, 128] with one bucket per ALIGNMENT byte.
+constexpr size_t kLinear = 128 / SystemConfig::ALIGNMENT;
+
 TEST(SizeClassTest, SmallObjectMapping) {
-    // Size 0 is policy-mapped to the minimum 8-byte class.
+    // Size 0 is policy-mapped to the minimum class (one ALIGNMENT unit).
     EXPECT_EQ(SizeClass::Index(0), 0);
     EXPECT_EQ(SizeClass::Index(1), 0);
-    EXPECT_EQ(SizeClass::Index(8), 0);
-    EXPECT_EQ(SizeClass::Size(0), 8);
+    EXPECT_EQ(SizeClass::Index(SystemConfig::ALIGNMENT), 0);
+    EXPECT_EQ(SizeClass::Size(0), SystemConfig::ALIGNMENT);
 
-    EXPECT_EQ(SizeClass::Index(120), 14);
-    EXPECT_EQ(SizeClass::Index(121), 15);
-    EXPECT_EQ(SizeClass::Index(128), 15);
-    EXPECT_EQ(SizeClass::Size(15), 128);
+    // Boundary between the last two linear buckets and the 128-byte top.
+    EXPECT_EQ(SizeClass::Index(128 - SystemConfig::ALIGNMENT), kLinear - 2);
+    EXPECT_EQ(SizeClass::Index(128 - SystemConfig::ALIGNMENT + 1), kLinear - 1);
+    EXPECT_EQ(SizeClass::Index(128), kLinear - 1);
+    EXPECT_EQ(SizeClass::Size(kLinear - 1), 128);
 }
 
 TEST(SizeClassTest, LargeObjectMapping) {
     // Group [129, 256]: step = (256 - 128) / 4 = 32, so buckets are
     // 160/192/224/256; the next group [257, 512] uses step 64 (bucket 320).
-    EXPECT_EQ(SizeClass::Index(129), 16);
-    EXPECT_EQ(SizeClass::Index(160), 16);
-    EXPECT_EQ(SizeClass::Size(16), 160);
+    EXPECT_EQ(SizeClass::Index(129), kLinear);
+    EXPECT_EQ(SizeClass::Index(160), kLinear);
+    EXPECT_EQ(SizeClass::Size(kLinear), 160);
 
-    EXPECT_EQ(SizeClass::Index(161), 17);
-    EXPECT_EQ(SizeClass::Index(192), 17);
-    EXPECT_EQ(SizeClass::Size(17), 192);
+    EXPECT_EQ(SizeClass::Index(161), kLinear + 1);
+    EXPECT_EQ(SizeClass::Index(192), kLinear + 1);
+    EXPECT_EQ(SizeClass::Size(kLinear + 1), 192);
 
-    EXPECT_EQ(SizeClass::Index(256), 19);
-    EXPECT_EQ(SizeClass::Size(19), 256);
+    EXPECT_EQ(SizeClass::Index(256), kLinear + 3);
+    EXPECT_EQ(SizeClass::Size(kLinear + 3), 256);
 
-    EXPECT_EQ(SizeClass::Index(257), 20);
-    EXPECT_EQ(SizeClass::Size(20), 320);
+    EXPECT_EQ(SizeClass::Index(257), kLinear + 4);
+    EXPECT_EQ(SizeClass::Size(kLinear + 4), 320);
 }
 
 TEST(SizeClassTest, MaxSizeBoundary) {
@@ -48,10 +52,19 @@ TEST(SizeClassTest, MaxSizeBoundary) {
 }
 
 TEST(SizeClassTest, RoundUp) {
-    EXPECT_EQ(SizeClass::RoundUp(1), 8);
-    EXPECT_EQ(SizeClass::RoundUp(8), 8);
+    EXPECT_EQ(SizeClass::RoundUp(1), SystemConfig::ALIGNMENT);
+    EXPECT_EQ(SizeClass::RoundUp(SystemConfig::ALIGNMENT), SystemConfig::ALIGNMENT);
     EXPECT_EQ(SizeClass::RoundUp(129), 160);
     EXPECT_EQ(SizeClass::RoundUp(SizeConfig::MAX_TC_SIZE), SizeConfig::MAX_TC_SIZE);
+}
+
+TEST(SizeClassTest, AllClassesAlignedToSystemAlignment) {
+    // Every class size must be a multiple of ALIGNMENT so that objects
+    // carved from an ALIGNMENT-aligned span base stay ALIGNMENT-aligned.
+    for (size_t idx = 0; idx < SizeClass::kNumSizeClasses; ++idx) {
+        EXPECT_EQ(SizeClass::Size(idx) % SystemConfig::ALIGNMENT, 0)
+                << "Size class " << idx << " is not a multiple of ALIGNMENT";
+    }
 }
 
 TEST(SizeClassTest, ComprehensiveRoundTrip) {
@@ -154,9 +167,9 @@ TEST(SizeClassTest, FragmentationAnalysis) {
 }
 
 TEST(SizeClassTest, SafeSizeBounds) {
-    EXPECT_EQ(SizeClass::SafeSize(0), 8);
-    EXPECT_EQ(SizeClass::SafeSize(15), 128);
-    EXPECT_EQ(SizeClass::SafeSize(16), 160);
+    EXPECT_EQ(SizeClass::SafeSize(0), SystemConfig::ALIGNMENT);
+    EXPECT_EQ(SizeClass::SafeSize(kLinear - 1), 128);
+    EXPECT_EQ(SizeClass::SafeSize(kLinear), 160);
     EXPECT_EQ(SizeClass::SafeSize(SizeClass::kNumSizeClasses - 1),
               SizeConfig::MAX_TC_SIZE);
 }

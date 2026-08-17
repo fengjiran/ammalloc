@@ -19,24 +19,49 @@ namespace ammalloc {
 
 namespace detail {
 
+// Small-object linear region: one bucket per ALIGNMENT byte over [1, 128].
+// 128 is the power-of-two boundary where the geometric groups start, so the
+// region holds 128 / ALIGNMENT buckets (8 when ALIGNMENT is 16).
+static constexpr size_t kSmallLinearLimit = 128;
+static constexpr size_t kLinearBucketCount = kSmallLinearLimit / SystemConfig::ALIGNMENT;
+static constexpr size_t kAlignShift = std::countr_zero(SystemConfig::ALIGNMENT);
+
+// Exponent of kSmallLinearLimit: 128 = 2^7, so the first geometric group
+// covers interval [128, 256) with msb 7.
+static constexpr size_t kLinearMsb = std::countr_zero(kSmallLinearLimit);
+
 static constexpr size_t CalculateIndex(size_t original_size) noexcept {
     if (original_size == 0) {
         return 0;
     }
 
-    // Linear range: 8-byte alignment in [1, 128] maps [1, 8] -> 0, ...,
-    // [121, 128] -> 15. The same formula generates the lookup table that
-    // Index() serves for sizes up to kSmallSizeThreshold.
+    // Linear range: ALIGNMENT-byte steps in [1, 128] map [1, 16] -> 0, ...,
+    // [113, 128] -> 7 when ALIGNMENT is 16. The same formula generates the
+    // lookup table that Index() serves for sizes up to kSmallSizeThreshold.
     // clang-format off
-    if (original_size <= 128) AM_LIKELY {
-        return (original_size - 1) >> 3;
+    if (original_size <= kSmallLinearLimit) AM_LIKELY {
+        return (original_size - 1) >> kAlignShift;
     }
     // clang-format on
 
-    // Subdivide each power-of-two interval into `kStepsPerGroup` buckets.
+    // Geometric groups: each power-of-two interval [2^n, 2^(n+1)) is split
+    // into kStepsPerGroup buckets. Example: size 150 -> 149 = 0b10010101,
+    // msb 7, group_idx 0, shift 5, offset 0 -> index 8 (160-byte bucket).
+    //   msb          - most significant bit of (size - 1), i.e. the interval
+    //                  number n; group 0 covers [128, 256) with msb 7.
+    //   group_idx    - zero-based group number, msb - kLinearMsb; groups with
+    //                  msb < kLinearMsb are already covered by the linear
+    //                  region.
+    //   base_idx     - global index of the group's first bucket, i.e.
+    //                  kLinearBucketCount + group_idx * kStepsPerGroup.
+    //   shift        - bucket width inside the group is 2^shift bytes;
+    //                  dropping `shift` low bits yields the bucket number.
+    //   group_offset - bucket position inside the group: the high bits of
+    //                  (size - 1) after dropping `shift` bits, masked to
+    //                  kStepsPerGroup - 1.
     int msb = std::bit_width(original_size - 1) - 1;
-    int group_idx = msb - 7;
-    size_t base_idx = 16 + (group_idx << SizeConfig::kStepShift);
+    int group_idx = msb - static_cast<int>(kLinearMsb);
+    size_t base_idx = kLinearBucketCount + (group_idx << SizeConfig::kStepShift);
     int shift = msb - SizeConfig::kStepShift;
     size_t group_offset = ((original_size - 1) >> shift) & (SizeConfig::kStepsPerGroup - 1);
 
@@ -44,19 +69,19 @@ static constexpr size_t CalculateIndex(size_t original_size) noexcept {
 }
 
 static constexpr size_t CalculateSize(size_t idx) noexcept {
-    // Right-inverse of CalculateIndex: indices 0..15 map directly to the
-    // 8-byte ladder through 128 bytes.
+    // Right-inverse of CalculateIndex: the first kLinearBucketCount indices
+    // map to the ALIGNMENT ladder through 128 bytes.
     // clang-format off
-    if (idx < 16) AM_LIKELY {
-        return (idx + 1) << 3;
+    if (idx < kLinearBucketCount) AM_LIKELY {
+        return (idx + 1) << kAlignShift;
     }
     // clang-format on
 
-    // Decode the group/step components of indices >= 16.
-    size_t relative_idx = idx - 16;
+    // Decode the group/step components of indices >= kLinearBucketCount.
+    size_t relative_idx = idx - kLinearBucketCount;
     size_t group_idx = relative_idx >> SizeConfig::kStepShift;
     size_t step_idx = relative_idx & (SizeConfig::kStepsPerGroup - 1);
-    size_t msb = group_idx + 7;
+    size_t msb = group_idx + kLinearMsb;
     size_t base_size = 1ULL << msb;
     size_t step_size = 1ULL << (msb - SizeConfig::kStepShift);
     return base_size + (step_idx + 1) * step_size;
@@ -65,49 +90,53 @@ static constexpr size_t CalculateSize(size_t idx) noexcept {
 }// namespace detail
 
 // Validate small-object boundaries.
-static_assert(detail::CalculateSize(0) == 8);
-static_assert(detail::CalculateSize(15) == 128);
+static_assert(detail::CalculateSize(0) == SystemConfig::ALIGNMENT);
+static_assert(detail::CalculateSize(detail::kLinearBucketCount - 1) == 128);
+static_assert(std::has_single_bit(detail::kSmallLinearLimit),
+              "kSmallLinearLimit must be a power of two for kLinearMsb to be exact");
 
 // Validate large-object group 0 (range 129-256). Step size = (256-128)/4 = 32.
-static_assert(detail::CalculateSize(16) == 160);// 128 + 32
-static_assert(detail::CalculateSize(17) == 192);// 160 + 32
-static_assert(detail::CalculateSize(19) == 256);// Last bucket of group 0
+static_assert(detail::CalculateSize(detail::kLinearBucketCount) == 160);    // 128 + 32
+static_assert(detail::CalculateSize(detail::kLinearBucketCount + 1) == 192);// 160 + 32
+static_assert(detail::CalculateSize(detail::kLinearBucketCount + 3) == 256);// Last bucket of group 0
 
 // Validate large-object group 1 (range 257-512). Step size = (512-256)/4 = 64.
-static_assert(detail::CalculateSize(20) == 320);// 256 + 64
+static_assert(detail::CalculateSize(detail::kLinearBucketCount + 4) == 320);// 256 + 64
 
 // Validate the Index -> Size -> Index inverse property.
 static_assert(detail::CalculateIndex(1) == 0);
-static_assert(detail::CalculateIndex(8) == 0);
-static_assert(detail::CalculateIndex(9) == 1);
-static_assert(detail::CalculateIndex(128) == 15);
-static_assert(detail::CalculateIndex(129) == 16);// Falls into 160-byte bucket
-static_assert(detail::CalculateIndex(160) == 16);
+static_assert(detail::CalculateIndex(SystemConfig::ALIGNMENT) == 0);
+static_assert(detail::CalculateIndex(SystemConfig::ALIGNMENT + 1) == 1);
+static_assert(detail::CalculateIndex(128) == detail::kLinearBucketCount - 1);
+static_assert(detail::CalculateIndex(129) == detail::kLinearBucketCount);// Falls into 160-byte bucket
+static_assert(detail::CalculateIndex(160) == detail::kLinearBucketCount);
 
 /// @brief Maps request sizes to bucket geometry and batch-transfer policies.
 ///
 /// The size ladder follows a TCMalloc-style stepped strategy:
-/// - [1, 128] bytes: 8-byte alignment.
+/// - [1, 128] bytes: `SystemConfig::ALIGNMENT`-byte steps (linear region).
 /// - [129, `MAX_TC_SIZE`] bytes: four buckets per power-of-two interval.
 ///
-/// Batch and page-transfer results are also indexed by size class so requests
-/// in the same bucket share one policy. The class holds no mutable runtime
-/// state: every lookup table is a compile-time constant, so all members are
-/// safe for concurrent use.
+/// The mapping is many-to-one: multiple request sizes share one class. For
+/// example, 129 and 160 both map to `kLinearBucketCount` (the first geometric
+/// bucket). Batch and page-transfer results are also indexed by size class so
+/// requests in the same bucket share one policy. The class holds no mutable
+/// runtime state: every lookup table is a compile-time constant, so all
+/// members are safe for concurrent use.
 class SizeClass {
 public:
     /// @brief Maps a requested size to its size-class index.
     ///
     /// This function implements a hybrid mapping strategy to balance memory overhead
     /// and lookup speed:
-    /// 1. Linear Mapping [1, 128] bytes: Precise 8-byte alignment for the most frequent
-    ///    small allocations.
+    /// 1. Linear Mapping [1, 128] bytes: one class per `SystemConfig::ALIGNMENT`
+    ///    bytes, so every class size is a multiple of ALIGNMENT.
     /// 2. Logarithmic Stepped Mapping (128B+): Uses a geometric progression (groups)
     ///    to maintain a constant relative fragmentation (~12.5% to 25% depending on
     ///    kStepShift) while significantly reducing the number of FreeLists in ThreadCache.
     ///
     /// @note Special case for size=0:
-    /// - `Index(0)` returns 0 (maps to the minimum 8-byte size class).
+    /// - `Index(0)` returns 0 (maps to the minimum size class of `SystemConfig::ALIGNMENT` bytes).
     /// - This design lets mapping interfaces (Index, RoundUp) handle size=0
     ///   gracefully, while strategy interfaces (CalculateBatchSize, GetMovePageNum)
     ///   treat 0 as invalid input.
@@ -309,20 +338,55 @@ private:
     }();
 };
 
-static_assert(SizeClass::Size(0) == 8);
-static_assert(SizeClass::Size(15) == 128);
-static_assert(SizeClass::Size(16) == 160);
-static_assert(SizeClass::Size(19) == 256);
-static_assert(SizeClass::Size(20) == 320);
-static_assert(SizeClass::Index(SizeClass::Size(20)) == 20);
-static_assert(SizeClass::Index(129) == 16);
-static_assert(SizeClass::Index(150) == 16);
+static_assert(SizeClass::Size(0) == SystemConfig::ALIGNMENT);
+static_assert(SizeClass::Size(detail::kLinearBucketCount - 1) == 128);
+static_assert(SizeClass::Size(detail::kLinearBucketCount) == 160);
+static_assert(SizeClass::Size(detail::kLinearBucketCount + 3) == 256);
+static_assert(SizeClass::Size(detail::kLinearBucketCount + 4) == 320);
+static_assert(SizeClass::Index(SizeClass::Size(detail::kLinearBucketCount + 4)) ==
+              detail::kLinearBucketCount + 4);
+static_assert(SizeClass::Index(129) == detail::kLinearBucketCount);
+static_assert(SizeClass::Index(150) == detail::kLinearBucketCount);
 
 static_assert(SizeClass::Index(0) == 0);
-static_assert(SizeClass::RoundUp(0) == 8);
-static_assert(SizeClass::CalculateBatchSize(8) == SizeClass::kMaxBatchSize);
-static_assert(SizeClass::GetMovePageNum(8) > 0);
+static_assert(SizeClass::RoundUp(0) == SystemConfig::ALIGNMENT);
 static_assert(SizeClass::kNumSizeClasses <= std::numeric_limits<uint8_t>::max());
+
+// Lock the strategy interfaces to compile-time evaluation: a future edit
+// that pulls a runtime call into CalculateBatchSize/GetMovePageNum (or their
+// table generators) fails here instead of silently losing constexpr.
+static_assert(SizeClass::CalculateBatchSize(SystemConfig::ALIGNMENT) ==
+              SizeClass::kMaxBatchSize);
+static_assert(SizeClass::GetMovePageNum(SystemConfig::ALIGNMENT) > 0);
+
+// The ladder is alignment-driven: assert the invariants the class mapping
+// actually depends on instead of bounding ALIGNMENT directly. Note that the
+// first one forces ALIGNMENT to be a power of two (all divisors of 128 are
+// powers of two), which keeps the countr_zero-based kAlignShift exact.
+static_assert(detail::kSmallLinearLimit % SystemConfig::ALIGNMENT == 0,
+              "ALIGNMENT must divide the linear-region top kSmallLinearLimit");
+static_assert(SizeConfig::kStepShift < detail::kLinearMsb,
+              "kStepShift >= kLinearMsb would underflow the geometric step shift");
+static_assert((detail::kSmallLinearLimit >> SizeConfig::kStepShift) %
+                              SystemConfig::ALIGNMENT ==
+                      0,
+              "smallest geometric step (kSmallLinearLimit >> kStepShift) must be a multiple of ALIGNMENT");
+static_assert(SizeConfig::kStepsPerGroup == (size_t{1} << SizeConfig::kStepShift),
+              "kStepsPerGroup must equal 1 << kStepShift for the bucket mask to be exact");
+
+// Exhaustively verify at compile time that every size class is a multiple of
+// ALIGNMENT, not just the sampled boundaries asserted above. An immediately
+// invoked lambda keeps the check local without adding a named entity to a
+// header (anonymous namespaces are banned in headers by the style rules).
+static_assert([] {
+    for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
+        if (SizeClass::Size(i) % SystemConfig::ALIGNMENT != 0) {
+            return false;
+        }
+    }
+    return true;
+}(),
+              "every size class must be a multiple of ALIGNMENT");
 
 // MAX_TC_SIZE must be a power of two to land exactly on a size class boundary.
 // With kStepsPerGroup=4, each power-of-2 interval is evenly divided,

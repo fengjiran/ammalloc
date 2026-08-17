@@ -18,7 +18,14 @@ struct SystemConfig {
     constexpr static size_t HUGE_PAGE_SIZE = 2 * 1024 * 1024;
     constexpr static size_t CACHE_LINE_SIZE = 64;
     constexpr static size_t BITMAP_BITS = 64;
-    constexpr static size_t ALIGNMENT = 16;
+    /// @brief Fundamental alignment guaranteed for every allocated object.
+    ///
+    /// Tied to the platform ABI via `alignof(std::max_align_t)` (16 on
+    /// x86-64/aarch64). The size-class ladder derives its small-object step
+    /// from this value, so every class size is a multiple of ALIGNMENT and
+    /// every object is ALIGNMENT-aligned: Span data starts at an ALIGNMENT
+    /// boundary and all class sizes are multiples of it.
+    constexpr static size_t ALIGNMENT = alignof(std::max_align_t);
 
 #ifdef AM_USE_57BIT_VA
     static constexpr size_t VA_BITS = 57;
