@@ -27,7 +27,7 @@ static constexpr size_t kLinearBucketCount = kSmallLinearLimit / SystemConfig::A
 static constexpr size_t kAlignShift = std::countr_zero(SystemConfig::ALIGNMENT);
 
 // Exponent of kSmallLinearLimit: 128 = 2^7, so the first geometric group
-// covers interval [128, 256) with msb 7.
+// covers request interval (128, 256] with msb 7.
 static constexpr size_t kLinearMsb = std::countr_zero(kSmallLinearLimit);
 
 static constexpr size_t CalculateIndex(size_t original_size) noexcept {
@@ -44,11 +44,11 @@ static constexpr size_t CalculateIndex(size_t original_size) noexcept {
     }
     // clang-format on
 
-    // Geometric groups: each power-of-two interval [2^n, 2^(n+1)) is split
-    // into kStepsPerGroup buckets. Example: size 150 -> 149 = 0b10010101,
+    // Geometric groups: each power-of-two request interval (2^n, 2^(n+1)] is
+    // split into kStepsPerGroup buckets. Example: size 150 -> 149 = 0b10010101,
     // msb 7, group_idx 0, shift 5, offset 0 -> index 8 (160-byte bucket).
     //   msb          - most significant bit of (size - 1), i.e. the interval
-    //                  number n; group 0 covers [128, 256) with msb 7.
+    //                  number n; group 0 covers (128, 256] with msb 7.
     //   group_idx    - zero-based group number, msb - kLinearMsb; groups with
     //                  msb < kLinearMsb are already covered by the linear
     //                  region.
