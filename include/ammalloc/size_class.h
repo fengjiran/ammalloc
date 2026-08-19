@@ -340,17 +340,16 @@ private:
     }();
 };
 
+static_assert(SizeClass::Index(SizeClass::Size(detail::kLinearBucketCount + 4)) ==
+              detail::kLinearBucketCount + 4);
+static_assert(SizeClass::Index(129) == detail::kLinearBucketCount);
+static_assert(SizeClass::Index(150) == detail::kLinearBucketCount);
+static_assert(SizeClass::Index(0) == 0);
 static_assert(SizeClass::Size(0) == SystemConfig::ALIGNMENT);
 static_assert(SizeClass::Size(detail::kLinearBucketCount - 1) == 128);
 static_assert(SizeClass::Size(detail::kLinearBucketCount) == 160);
 static_assert(SizeClass::Size(detail::kLinearBucketCount + 3) == 256);
 static_assert(SizeClass::Size(detail::kLinearBucketCount + 4) == 320);
-static_assert(SizeClass::Index(SizeClass::Size(detail::kLinearBucketCount + 4)) ==
-              detail::kLinearBucketCount + 4);
-static_assert(SizeClass::Index(129) == detail::kLinearBucketCount);
-static_assert(SizeClass::Index(150) == detail::kLinearBucketCount);
-
-static_assert(SizeClass::Index(0) == 0);
 static_assert(SizeClass::RoundUp(0) == SystemConfig::ALIGNMENT);
 static_assert(SizeClass::kNumSizeClasses <= std::numeric_limits<uint8_t>::max());
 
@@ -369,9 +368,7 @@ static_assert(detail::kSmallLinearLimit % SystemConfig::ALIGNMENT == 0,
               "ALIGNMENT must divide the linear-region top kSmallLinearLimit");
 static_assert(SizeConfig::kStepShift < detail::kLinearMsb,
               "kStepShift >= kLinearMsb would underflow the geometric step shift");
-static_assert((detail::kSmallLinearLimit >> SizeConfig::kStepShift) %
-                              SystemConfig::ALIGNMENT ==
-                      0,
+static_assert((detail::kSmallLinearLimit >> SizeConfig::kStepShift) % SystemConfig::ALIGNMENT == 0,
               "smallest geometric step (kSmallLinearLimit >> kStepShift) must be a multiple of ALIGNMENT");
 static_assert(SizeConfig::kStepsPerGroup == (size_t{1} << SizeConfig::kStepShift),
               "kStepsPerGroup must equal 1 << kStepShift for the bucket mask to be exact");
@@ -433,7 +430,8 @@ consteval bool ValidateSizeNotLessThanInputSampled() {
         if (idx > 0) {
             size_t prev_class = SizeClass::Size(idx - 1);
             // Interior sample: mid must not round down into the previous class.
-            if (size_t mid = (prev_class + class_size) / 2; SizeClass::Size(SizeClass::Index(mid)) < mid) {
+            if (size_t mid = (prev_class + class_size) / 2;
+                SizeClass::Size(SizeClass::Index(mid)) < mid) {
                 return false;
             }
         }
@@ -444,7 +442,8 @@ consteval bool ValidateSizeNotLessThanInputSampled() {
 consteval bool ValidateIndexIdempotentSampled() {
     for (size_t idx = 0; idx < SizeClass::kNumSizeClasses; ++idx) {
         size_t class_size = SizeClass::Size(idx);
-        if (SizeClass::Index(SizeClass::Size(SizeClass::Index(class_size))) != SizeClass::Index(class_size)) {
+        if (SizeClass::Index(SizeClass::Size(SizeClass::Index(class_size))) !=
+            SizeClass::Index(class_size)) {
             return false;
         }
     }
@@ -473,13 +472,13 @@ consteval bool ValidateRoundUpMonotonicSampled() {
     return true;
 }
 
+static_assert(ValidateIndexInRangeSampled(), "Index(s) must map to valid class at boundaries");
+static_assert(ValidateSizeNotLessThanInputSampled(), "Size(Index(s)) must be >= s at class boundaries");
+static_assert(ValidateIndexIdempotentSampled(), "Index(Size(Index(s))) must equal Index(s) at boundaries");
+static_assert(ValidateSizeMonotonic(), "Size(idx) must be strictly increasing");
+static_assert(ValidateRoundUpMonotonicSampled(), "RoundUp(s) must be non-decreasing at class boundaries");
 }// namespace detail
 
-static_assert(detail::ValidateIndexInRangeSampled(), "Index(s) must map to valid class at boundaries");
-static_assert(detail::ValidateSizeNotLessThanInputSampled(), "Size(Index(s)) must be >= s at class boundaries");
-static_assert(detail::ValidateIndexIdempotentSampled(), "Index(Size(Index(s))) must equal Index(s) at boundaries");
-static_assert(detail::ValidateSizeMonotonic(), "Size(idx) must be strictly increasing");
-static_assert(detail::ValidateRoundUpMonotonicSampled(), "RoundUp(s) must be non-decreasing at class boundaries");
 }// namespace ammalloc
 
 #endif// AMMALLOC_SIZE_CLASS_H
