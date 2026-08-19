@@ -70,6 +70,7 @@ clang-tidy -p build $(git diff --name-only main | grep -E '\.(h|cpp)$')
 - [ ] **提交信息规范**：`type(scope): description` 格式
 - [ ] **无敏感信息泄露**：无密钥、密码、内部 IP
 - [ ] **无意外文件**：无 `.o`, `.exe`, `*.log` 等构建产物
+- [ ] **文档同步**：按 [documentation-guide.md §6 触发矩阵](documentation-guide.md) 核对变更类型；命中项必须在本 PR 或显式标注的跟进 PR 中更新对应文档（设计文档 / API 参考 / CHANGELOG / 索引）
 
 ---
 
@@ -445,12 +446,23 @@ spdlog::error("SystemAlloc failed: {}", errno); // 错误
 | **设计文档** | N/A | 架构图 | 详细设计文档 |
 | **变更日志** | N/A | CHANGELOG 条目 | 迁移指南 |
 
-#### 文档质量检查
+#### 文档质量检查（四维标准，详见 [documentation-guide.md §4](documentation-guide.md)）
 
-- [ ] 公共 API 有完整的 Doxygen 注释
+- [ ] **完整性**：遵循 `docs/templates/` 模板；设计文档覆盖该模块全部公共头文件符号；接口表与头文件符号一致
+- [ ] **准确性**：只写已验证事实；状态字段正确（Current/Draft/Deprecated）；无过期数据
+- [ ] **可读性**：单文档 ≤ 1000 行；跨层流程用图；表格优先于长段落
+- [ ] **一致性**：术语与 [docs/README.md 术语表](../README.md) 一致；命名符合文档系统规范 §2；相对链接全部有效
+
+#### 文档变更 PR 检查清单（新增/修改文档必过）
+
+- [ ] 头部状态与元数据（状态/日期/关联代码）正确
+- [ ] `docs/README.md` 索引已同步（新增文档必须登记）
+- [ ] 交叉引用使用具名相对链接，章节引用带稳定编号（文档系统规范 §3）
+- [ ] 公共 API 有完整的 Doxygen 注释（`///` + 必选标签，见 [cpp_comment_guidelines.md](cpp_comment_guidelines.md)）
 - [ ] 复杂算法有数学推导或流程图
 - [ ] 非直观代码有 "为什么" 注释
 - [ ] TODO/FIXME 关联 Issue 编号
+- [ ] 行为可见变更已写入 CHANGELOG.md
 
 ---
 
@@ -615,7 +627,7 @@ valgrind --leak-check=full --show-leak-kinds=all \
 ## 基本信息
 - **审查日期**: 2026-03-07
 - **审查人**: [姓名]
-- **PR**: [#123](link)
+- **PR**: #123
 - **风险级别**: 🔴 Deep / 🟡 Standard / 🟢 Quick
 - **审查耗时**: [X 小时]
 
@@ -645,9 +657,9 @@ valgrind --leak-check=full --show-leak-kinds=all \
 | 1 | 注释不清晰 | 添加算法说明 |
 
 ## 证据附件
-- [TSan 报告](tsan.log)
-- [Benchmark 对比](benchmark_diff.md)
-- [覆盖率报告](coverage.html)
+- TSan 报告：`tsan.log`
+- Benchmark 对比：`benchmark_diff.md`
+- 覆盖率报告：`coverage.html`
 
 ## 结论
 - **状态**: 🟡 有条件通过（修复 P0 后可合并）

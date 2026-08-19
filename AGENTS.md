@@ -32,8 +32,9 @@ ammalloc/
 │   ├── assert.h                   # 断言宏：AMMALLOC_CHECK / AMMALLOC_DCHECK
 │   ├── attributes.h               # 编译器属性与 builtin 包装宏
 │   ├── common.h                   # 公共类型与工具宏
-│   ├── config.h                   # 编译期与运行期配置
-│   ├── thread_cache.h             # TLS 前端缓存
+│   ├── config.h                 # 编译期与运行期配置
+│   ├── free_list.h              # 嵌入式 LIFO 空闲链表（FreeList/FreeBlock）
+│   ├── thread_cache.h           # TLS 前端缓存
 │   ├── central_cache.h            # 全局中端缓存
 │   ├── page_cache.h               # 后端页缓存
 │   ├── page_allocator.h           # OS 交互层
@@ -59,6 +60,16 @@ ammalloc/
     └── benchmark/
         ├── CMakeLists.txt         # google benchmark 依赖 + 单可执行 ammalloc_benchmarks
         └── benchmark_*.cpp        # 基准测试源文件（GLOB_RECURSE 自动收集）
+└── docs/                           # 文档系统（索引见 docs/README.md）
+    ├── README.md                   # 文档索引与术语表
+    ├── issues.md                   # 问题与待办跟踪
+    ├── designs/                    # 架构与模块设计（NN- 编号，描述已验证实现）
+    │   └── research/               # 调研备忘
+    ├── improvement-plan/           # 演进提案与路线图（18 个编号专题）
+    ├── guides/                     # 编码/注释/测试/文档规范
+    ├── api/                        # 公共 API 参考
+    ├── decisions/                  # 架构决策记录（ADR）
+    └── templates/                  # 文档模板
 ```
 
 ## 3. 架构概览
@@ -208,7 +219,11 @@ See full test writing rules:
    ```bash
    ./build/tests/benchmark/ammalloc_benchmarks --benchmark_filter=BM_<Group>.*
    ```
-4. 清晰报告风险：正确性、并发、内存、性能。
+4. 涉及文档时运行漂移检测（链接有效性 / 符号可追溯 / 索引覆盖）：
+   ```bash
+   python3 scripts/verify_docs.py
+   ```
+5. 清晰报告风险：正确性、并发、内存、性能。
 
 构建说明：
 

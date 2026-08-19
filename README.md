@@ -194,12 +194,19 @@ include/ammalloc/   Public APIs and core data structures
 src/                Allocator implementation
 tests/unit/         GoogleTest unit tests
 tests/benchmark/    Google Benchmark suites
-docs/designs/       Architecture and subsystem design documents
-docs/guides/        Coding, commenting, testing, and review guidelines
+docs/               Documentation (index: docs/README.md)
 ```
 
 See [`docs/designs/ammalloc_design.md`](docs/designs/ammalloc_design.md) for a
-deeper implementation overview. Before contributing, read
+deeper implementation overview. The `docs/` directory is organized as:
+
+- `docs/designs/` - architecture overview and module design documents
+- `docs/improvement-plan/` - evolution proposals and roadmap
+- `docs/guides/` - coding, commenting, testing, review, and documentation guidelines
+- `docs/api/` - public API reference
+- `docs/decisions/` - architecture decision records (ADR)
+
+Before contributing, read
 [`AGENTS.md`](AGENTS.md) and the engineering guidelines under `docs/guides/`.
 Any change to a core path should be evaluated for correctness, concurrency
 safety, memory usage, and performance regressions.

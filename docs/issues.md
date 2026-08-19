@@ -1,6 +1,7 @@
-本文档记录了 AetherMind 内存池项目的已知缺陷修复计划、性能优化点以及未来向工业级功能对齐的演进路线。
+本文档记录 ammalloc 项目的已知缺陷修复计划与短期优化待办（问题跟踪）。
 
-> **🔗 相关资源**: [📅 查看开发进度日志 (Development Log)](../../logs/development_log.md)
+> **与演进提案的边界**：已知缺陷/短期优化 → 本文档；长期架构演进提案 → [improvement-plan/](improvement-plan/README.md)；缺陷修复完成后的行为变更 → [CHANGELOG.md](../CHANGELOG.md)。
+> 条目完成（`[x]`）后保留在本文档作为历史，不删除。
 
 ### 🔴 P0: 紧急修复 (Critical Fixes)
 
@@ -160,7 +161,7 @@
 - [x] #### **PageCache 代码审查与测试完善 [Code Quality]**
 - 背景：`PageCache` 作为 ammalloc 后端核心组件，需要全面的代码审查和测试覆盖。
 - 完成工作：
-  - 代码审查报告生成 (`docs/reviews/code_review/20260315_page_cache_code_review.md`)
+  - 代码审查报告生成（PageCache 代码审查，2026-03-15）
   - 修复 P0 问题：`PageMap::GetSpan` 边界检查缺失
   - 新增 8 个测试用例（5 个增量 + 3 个失败路径）
   - 性能基准测试建设（修复段错误，覆盖单线程/多线程）
@@ -429,11 +430,11 @@
 
 - 2026-3-4
   - 完成 `PageHeapScavenger` 核心实现，标记为完成（待修复并发安全问题后可用）。
-  - 同步 `docs/reviews/code_review/` 中的 Code Review 问题到本 TODO 列表。
+  - 同步 Code Review 发现的问题到本清单。
   - 新增 P0 级别问题：HugePageCache std::vector 自举违反、Span::FreeObject double-free 漏洞、GetOneSpan Release 空指针解引用。
   - 新增 P1 级别问题：ThreadCache 初始化锁、CentralCache unlock-relock 窗口、TLS 析构顺序。
   - 新增 P2/P3 级别功能需求：am_realloc/calloc/memalign、data 区域验证、ObjectPool 归属检查等。
-  - 更新开发日志 (`docs/logs/development_log.md`) 记录 PageHeapScavenger 架构决策。
+  - 记录 PageHeapScavenger 架构决策（现归档于 [docs/decisions/0001-scavenger-startup-strategy.md](decisions/0001-scavenger-startup-strategy.md)）。
 
 - 2026-3-1
   -  增加 Code Review 发现的 5 个新优化项 (Radix Tree Fix, CentralCache Lock, ThreadCache Pool, Safety)。
