@@ -8,6 +8,8 @@
 // helpers below so the common case stays branch-light and lock-free.
 #include "ammalloc/thread_cache.h"
 
+#include "ammalloc/central_cache.h"
+
 namespace ammalloc {
 
 void ThreadCache::ReleaseAll() {

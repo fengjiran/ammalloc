@@ -1,4 +1,5 @@
 #include "ammalloc/ammalloc.h"
+#include "ammalloc/central_cache.h"
 #include "ammalloc/config.h"
 #include "ammalloc/page_allocator.h"
 #include "ammalloc/page_cache.h"

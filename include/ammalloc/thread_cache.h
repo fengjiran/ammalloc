@@ -7,9 +7,11 @@
 /// The hot path is lock-free because each ThreadCache and its FreeLists are
 /// owned by one thread. Batched slow paths exchange objects with CentralCache,
 /// while quota growth and decay limit persistent per-thread memory retention.
+/// @see docs/designs/02-thread-cache.md
 
 #include "ammalloc/assert.h"
-#include "ammalloc/central_cache.h"
+#include "ammalloc/free_list.h"
+#include "ammalloc/size_class.h"
 
 namespace ammalloc {
 
