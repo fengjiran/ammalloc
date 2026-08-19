@@ -1,5 +1,7 @@
 # 第 12 章：安全加固
 
+> **状态**: Draft（规划草案，未实施）
+
 > [总索引](README.md) · [上一章](10-observability-and-profiling.md) · [下一章](12-testing-and-validation.md)  
 > **本章目标**：按运行 Profile 提供分层内存安全检测与利用缓解能力。  
 > **适用范围**：pointer validation、freelist hardening、redzone、guard、quarantine 与安全配置。  

@@ -1,5 +1,7 @@
 # 第 13 章：测试与验证体系
 
+> **状态**: Draft（规划草案，未实施）
+
 > [总索引](README.md) · [上一章](11-security-hardening.md) · [下一章](13-engineering-and-release.md)  
 > **本章目标**：建立覆盖功能、并发、失败、兼容性和性能回归的验证体系。  
 > **适用范围**：单元测试、模型测试、并发、fault injection、fuzz、sanitizer、ABI 与 benchmark。  

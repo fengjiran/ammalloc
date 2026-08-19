@@ -1,5 +1,7 @@
 # 第 11 章：可观测性与 Profiling
 
+> **状态**: Draft（规划草案，未实施）
+
 > [总索引](README.md) · [上一章](09-numa-and-aethermind.md) · [下一章](11-security-hardening.md)  
 > **本章目标**：建设不递归、低开销、可归因的统计、采样与诊断体系。  
 > **适用范围**：stats、control ABI、sampling、heap profile、event ring 与 exporter。  

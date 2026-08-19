@@ -1,5 +1,7 @@
 # 第 9 章：RSS、碎片与后台回收
 
+> **状态**: Draft（规划草案，未实施）
+
 > [总索引](README.md) · [上一章](07-backend-pagecache-large-object.md) · [下一章](09-numa-and-aethermind.md)  
 > **本章目标**：在复用延迟、RSS、碎片、系统调用和尾延迟之间建立反馈控制。  
 > **适用范围**：allocator 各层缓存、Scavenger、decay、purge、cgroup/PSI 与内存预算。  

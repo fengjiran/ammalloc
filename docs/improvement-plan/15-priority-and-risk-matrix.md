@@ -1,5 +1,7 @@
 # 第 16 章：优先级与风险矩阵
 
+> **状态**: Draft（规划草案，未实施）
+
 > [总索引](README.md) · [上一章](14-implementation-roadmap.md) · [下一章](16-implementation-principles.md)  
 > **本章目标**：统一优先级、风险类型、验收证据和动态调整规则。  
 > **适用范围**：P0–P3 事项、风险登记、owner、门禁和重排规则。  

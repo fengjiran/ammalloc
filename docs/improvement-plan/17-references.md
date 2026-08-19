@@ -1,5 +1,7 @@
 # 第 18 章：参考资料
 
+> **状态**: Draft（规划草案，未实施）
+
 > [总索引](README.md) · [上一章](16-implementation-principles.md) · [下一章](18-final-recommendations.md)  
 > **本章目标**：维护设计决策所依赖的一手资料和仓库事实来源。  
 > **适用范围**：TCMalloc、jemalloc、Linux、标准、论文及内部事实。  

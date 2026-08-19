@@ -1,5 +1,7 @@
 # 第 10 章：NUMA 与 aethermind 集成
 
+> **状态**: Draft（规划草案，未实施）
+
 > [总索引](README.md) · [上一章](08-rss-fragmentation-and-scavenging.md) · [下一章](10-observability-and-profiling.md)  
 > **本章目标**：为 NUMA-local 分配和 aethermind 生命周期化内存提供可落地接口。  
 > **适用范围**：NUMA topology/policy、node-local arena、模型/KV/workspace 和 device memory 边界。  

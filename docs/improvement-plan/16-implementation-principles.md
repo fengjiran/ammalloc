@@ -1,5 +1,7 @@
 # 第 17 章：关键实施原则
 
+> **状态**: Draft（规划草案，未实施）
+
 > [总索引](README.md) · [上一章](15-priority-and-risk-matrix.md) · [下一章](17-references.md)  
 > **本章目标**：固化跨模块设计、实现、评审和发布必须遵循的原则。  
 > **适用范围**：correctness、concurrency、performance、memory、bootstrap、API 与 release。  

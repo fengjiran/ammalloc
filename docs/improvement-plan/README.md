@@ -19,26 +19,26 @@ ammalloc 现有的 `ThreadCache -> CentralCache -> PageCache -> PageAllocator` �
 
 ## 完整目录
 
-| 序号 | 专题 | 主要风险 |
-|---:|:---|---|
-| 01 | [总体结论与产品定位](01-overview-and-positioning.md) | 架构、产品边界 |
-| 02 | [目标架构](02-target-architecture.md) | 架构、兼容性 |
-| 03 | [正确性、自举与 ABI](03-correctness-bootstrap-and-abi.md) | 正确性、内存、兼容性 |
-| 04 | [PageMap 与 Span 生命周期](04-pagemap-and-span-lifecycle.md) | 正确性、并发、内存 |
-| 05 | [Frontend 提升](05-frontend.md) | 性能、并发、生命周期 |
-| 06 | [Middle-end 提升](06-middle-end.md) | 并发、性能、内存 |
-| 07 | [Backend、PageCache 与大对象管理](07-backend-pagecache-large-object.md) | 正确性、并发、内存、性能 |
-| 08 | [RSS、碎片与后台回收](08-rss-fragmentation-and-scavenging.md) | 内存、性能、运维 |
-| 09 | [NUMA 与 aethermind 集成](09-numa-and-aethermind.md) | 架构、性能、兼容性 |
-| 10 | [可观测性与 Profiling](10-observability-and-profiling.md) | 性能、自举、运维 |
-| 11 | [安全加固](11-security-hardening.md) | 安全、正确性、性能 |
-| 12 | [测试与验证体系](12-testing-and-validation.md) | 正确性、工程、性能测量 |
-| 13 | [工程化与发布](13-engineering-and-release.md) | ABI、工程、运维 |
-| 14 | [分阶段实施路线图](14-implementation-roadmap.md) | 依赖、交付、风险控制 |
-| 15 | [优先级与风险矩阵](15-priority-and-risk-matrix.md) | 项目治理、风险 |
-| 16 | [关键实施原则](16-implementation-principles.md) | 跨模块 invariant |
-| 17 | [参考资料](17-references.md) | 事实与决策依据 |
-| 18 | [最终建议](18-final-recommendations.md) | 里程碑、终态判断 |
+| 序号 | 专题 | 状态 | 主要风险 |
+|---:|:---|:---|---|
+| 01 | [总体结论与产品定位](01-overview-and-positioning.md) | Draft | 架构、产品边界 |
+| 02 | [目标架构](02-target-architecture.md) | Draft | 架构、兼容性 |
+| 03 | [正确性、自举与 ABI](03-correctness-bootstrap-and-abi.md) | Draft | 正确性、内存、兼容性 |
+| 04 | [PageMap 与 Span 生命周期](04-pagemap-and-span-lifecycle.md) | Draft | 正确性、并发、内存 |
+| 05 | [Frontend 提升](05-frontend.md) | Draft | 性能、并发、生命周期 |
+| 06 | [Middle-end 提升](06-middle-end.md) | Draft | 并发、性能、内存 |
+| 07 | [Backend、PageCache 与大对象管理](07-backend-pagecache-large-object.md) | Draft | 正确性、并发、内存、性能 |
+| 08 | [RSS、碎片与后台回收](08-rss-fragmentation-and-scavenging.md) | Draft | 内存、性能、运维 |
+| 09 | [NUMA 与 aethermind 集成](09-numa-and-aethermind.md) | Draft | 架构、性能、兼容性 |
+| 10 | [可观测性与 Profiling](10-observability-and-profiling.md) | Draft | 性能、自举、运维 |
+| 11 | [安全加固](11-security-hardening.md) | Draft | 安全、正确性、性能 |
+| 12 | [测试与验证体系](12-testing-and-validation.md) | Draft | 正确性、工程、性能测量 |
+| 13 | [工程化与发布](13-engineering-and-release.md) | Draft | ABI、工程、运维 |
+| 14 | [分阶段实施路线图](14-implementation-roadmap.md) | Draft | 依赖、交付、风险控制 |
+| 15 | [优先级与风险矩阵](15-priority-and-risk-matrix.md) | Draft | 项目治理、风险 |
+| 16 | [关键实施原则](16-implementation-principles.md) | Draft | 跨模块 invariant |
+| 17 | [参考资料](17-references.md) | Draft | 事实与决策依据 |
+| 18 | [最终建议](18-final-recommendations.md) | Draft | 里程碑、终态判断 |
 
 ## 推荐阅读路径
 
@@ -70,3 +70,4 @@ ammalloc 现有的 `ThreadCache -> CentralCache -> PageCache -> PageAllocator` �
 - 当前实现、已批准设计和长期设想必须明确区分。
 - 修改架构 invariant 时，应同时检查路线图、风险矩阵、测试计划和最终建议。
 - 新增专题优先扩展现有职责边界；只有形成独立评审单元时才增加文件。
+- 每篇专题头部维护状态字段（Draft / In Progress / Implemented / Superseded，本目录表同步更新）；专题落地后状态改为 Implemented，并在正文首部链接对应模块设计文档、ADR 与 CHANGELOG 条目。

@@ -1,5 +1,7 @@
 # 第 7 章：Middle-end 提升
 
+> **状态**: Draft（规划草案，未实施）
+
 > [总索引](README.md) · [上一章](05-frontend.md) · [下一章](07-backend-pagecache-large-object.md)  
 > **本章目标**：提升批量对象流转、跨线程均衡和 CentralCache 并发扩展能力。  
 > **适用范围**：TransferCache、CentralCache、Span bitmap、ObjectBatch、分片与预取。  

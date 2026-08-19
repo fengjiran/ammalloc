@@ -1,5 +1,7 @@
 # 第 15 章：分阶段实施路线图
 
+> **状态**: Draft（规划草案，未实施）
+
 > [总索引](README.md) · [上一章](13-engineering-and-release.md) · [下一章](15-priority-and-risk-matrix.md)  
 > **本章目标**：按依赖关系和风险消减顺序安排实施阶段与退出门。  
 > **适用范围**：Phase 0–7 的工作包、依赖、退出条件和 Definition of Done。  

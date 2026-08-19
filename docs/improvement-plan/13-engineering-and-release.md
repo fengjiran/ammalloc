@@ -1,5 +1,7 @@
 # 第 14 章：工程化与发布
 
+> **状态**: Draft（规划草案，未实施）
+
 > [总索引](README.md) · [上一章](12-testing-and-validation.md) · [下一章](14-implementation-roadmap.md)  
 > **本章目标**：建立可构建、可安装、可发布、可灰度和可回滚的工程体系。  
 > **适用范围**：CMake target、依赖、符号、ABI 版本、安装包、CI、release train 与 runbook。  

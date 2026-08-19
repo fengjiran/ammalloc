@@ -1,5 +1,7 @@
 # 第 3 章：目标架构
 
+> **状态**: Draft（规划草案，未实施）
+
 > [总索引](README.md) · [上一章](01-overview-and-positioning.md) · [下一章](03-correctness-bootstrap-and-abi.md)  
 > **本章目标**：定义 Frontend、Middle-end、Backend 与横向基础设施的目标形态。  
 > **适用范围**：全分配链路及统计、自举、压力反馈等横向能力。  

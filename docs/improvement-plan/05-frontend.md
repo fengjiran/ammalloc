@@ -1,5 +1,7 @@
 # 第 6 章：Frontend 提升
 
+> **状态**: Draft（规划草案，未实施）
+
 > [总索引](README.md) · [上一章](04-pagemap-and-span-lifecycle.md) · [下一章](06-middle-end.md)  
 > **本章目标**：在保持无锁 LIFO 快路径的前提下提升容量治理、生命周期和可扩展性。  
 > **适用范围**：ThreadCache、FreeList、TLS、batch refill/release、remote free 与可选 per-CPU cache。  

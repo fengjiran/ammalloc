@@ -1,5 +1,7 @@
 # 第 4 章：正确性、自举与 ABI
 
+> **状态**: Draft（规划草案，未实施）
+
 > [总索引](README.md) · [上一章](02-target-architecture.md) · [下一章](04-pagemap-and-span-lifecycle.md)  
 > **本章目标**：建立显式 allocator、标准 ABI 和动态拦截共同依赖的正确性与自举契约。  
 > **适用范围**：公共 API、C/C++ ABI、初始化、TLS、OOM、对齐、realloc、fork 与 shutdown。  

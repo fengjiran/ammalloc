@@ -1,5 +1,7 @@
 # 第 8 章：Backend、PageCache 与大对象管理
 
+> **状态**: Draft（规划草案，未实施）
+
 > [总索引](README.md) · [上一章](06-middle-end.md) · [下一章](08-rss-fragmentation-and-scavenging.md)  
 > **本章目标**：建立可事务化的页级分配、回收、大对象和 OS 交互路径。  
 > **适用范围**：PageCache、PageAllocator、Region、LargeExtent、split/coalesce、THP 与 hugepage。  

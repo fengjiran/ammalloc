@@ -1,5 +1,7 @@
 # 第 5 章：PageMap 与 Span 生命周期
 
+> **状态**: Draft（规划草案，未实施）
+
 > [总索引](README.md) · [上一章](03-correctness-bootstrap-and-abi.md) · [下一章](05-frontend.md)  
 > **本章目标**：建立无锁 PageMap reader 可依赖的稳定 Span 生命周期与发布协议。  
 > **适用范围**：RadixTree、PageMap、Span descriptor、owner shard 与回收协议。  
