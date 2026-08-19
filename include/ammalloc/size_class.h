@@ -87,33 +87,31 @@ static constexpr size_t CalculateSize(size_t idx) noexcept {
     return base_size + (step_idx + 1) * step_size;
 }
 
-}// namespace detail
-
 // Validate small-object boundaries.
-static_assert(detail::CalculateSize(0) == SystemConfig::ALIGNMENT);
-static_assert(detail::CalculateSize(detail::kLinearBucketCount - 1) == 128);
 static_assert(std::has_single_bit(detail::kSmallLinearLimit),
               "kSmallLinearLimit must be a power of two for kLinearMsb to be exact");
-
+static_assert(CalculateSize(0) == SystemConfig::ALIGNMENT);
+static_assert(CalculateSize(kLinearBucketCount - 1) == kSmallLinearLimit);
 // Validate large-object group 0 (range 129-256). Step size = (256-128)/4 = 32.
-static_assert(detail::CalculateSize(detail::kLinearBucketCount) == 160);    // 128 + 32
-static_assert(detail::CalculateSize(detail::kLinearBucketCount + 1) == 192);// 160 + 32
-static_assert(detail::CalculateSize(detail::kLinearBucketCount + 3) == 256);// Last bucket of group 0
-
+static_assert(CalculateSize(kLinearBucketCount) == 160);    // 128 + 32
+static_assert(CalculateSize(kLinearBucketCount + 1) == 192);// 160 + 32
+static_assert(CalculateSize(kLinearBucketCount + 3) == 256);// Last bucket of group 0
 // Validate large-object group 1 (range 257-512). Step size = (512-256)/4 = 64.
-static_assert(detail::CalculateSize(detail::kLinearBucketCount + 4) == 320);// 256 + 64
+static_assert(CalculateSize(kLinearBucketCount + 4) == 320);// 256 + 64
 
 // Validate the Index -> Size -> Index inverse property.
-static_assert(detail::CalculateIndex(1) == 0);
-static_assert(detail::CalculateIndex(SystemConfig::ALIGNMENT) == 0);
-static_assert(detail::CalculateIndex(SystemConfig::ALIGNMENT + 1) == 1);
-static_assert(detail::CalculateIndex(128) == detail::kLinearBucketCount - 1);
-static_assert(detail::CalculateIndex(129) == detail::kLinearBucketCount);// Falls into 160-byte bucket
-static_assert(detail::CalculateIndex(160) == detail::kLinearBucketCount);
+static_assert(CalculateIndex(1) == 0);
+static_assert(CalculateIndex(SystemConfig::ALIGNMENT) == 0);
+static_assert(CalculateIndex(SystemConfig::ALIGNMENT + 1) == 1);
+static_assert(CalculateIndex(128) == kLinearBucketCount - 1);
+static_assert(CalculateIndex(129) == kLinearBucketCount);// Falls into 160-byte bucket
+static_assert(CalculateIndex(160) == kLinearBucketCount);
+
+}// namespace detail
 
 /// @brief Maps request sizes to bucket geometry and batch-transfer policies.
 ///
-/// The size ladder follows a TCMalloc-style stepped strategy:
+/// The size ladder follows a jemalloc-style stepped strategy:
 /// - [1, 128] bytes: `SystemConfig::ALIGNMENT`-byte steps (linear region).
 /// - [129, `MAX_TC_SIZE`] bytes: four buckets per power-of-two interval.
 ///
@@ -125,6 +123,8 @@ static_assert(detail::CalculateIndex(160) == detail::kLinearBucketCount);
 /// members are safe for concurrent use.
 class SizeClass {
 public:
+    SizeClass() = delete;
+
     /// @brief Maps a requested size to its size-class index.
     ///
     /// This function implements a hybrid mapping strategy to balance memory overhead
@@ -259,11 +259,11 @@ public:
     /// @param aligned_size Requested or already-rounded object size.
     /// @return Number of pages to allocate, or 0 for invalid input.
     AM_ALWAYS_INLINE static constexpr size_t GetMovePageNum(size_t aligned_size) noexcept {
-        if (aligned_size == 0 || aligned_size > SizeConfig::MAX_TC_SIZE) return 0;
+        if (aligned_size == 0 || aligned_size > SizeConfig::MAX_TC_SIZE) {
+            return 0;
+        }
         return MovePagesByIndex(Index(aligned_size));
     }
-
-    SizeClass() = delete;
 
     /// Number of size classes used to size ThreadCache and CentralCache arrays.
     static constexpr size_t kNumSizeClasses = detail::CalculateIndex(SizeConfig::MAX_TC_SIZE) + 1;
@@ -301,11 +301,12 @@ private:
     static constexpr auto batch_table_ = []() consteval {
         std::array<uint16_t, kNumSizeClasses> t{};
         for (size_t idx = 0; idx < kNumSizeClasses; ++idx) {
-            size_t norm = size_table_[idx];
-            size_t batch = SizeConfig::MAX_TC_SIZE / norm;
+            size_t aligned_size = size_table_[idx];
+            size_t batch = SizeConfig::MAX_TC_SIZE / aligned_size;
             if (batch < 2) {
                 batch = 2;
             }
+
             if (batch > kMaxBatchSize) {
                 batch = kMaxBatchSize;
             }
@@ -319,10 +320,10 @@ private:
     static constexpr auto move_page_table_ = []() consteval {
         std::array<uint16_t, kNumSizeClasses> t{};
         for (size_t idx = 0; idx < kNumSizeClasses; ++idx) {
-            size_t norm = size_table_[idx];
+            size_t aligned_size = size_table_[idx];
             size_t batch = batch_table_[idx];
             size_t total_objs = batch << 3;
-            size_t total_bytes = total_objs * norm;
+            size_t total_bytes = total_objs * aligned_size;
             if (total_bytes < 32 * 1024) {
                 total_bytes = 32 * 1024;
             }
@@ -378,7 +379,7 @@ static_assert(SizeConfig::kStepsPerGroup == (size_t{1} << SizeConfig::kStepShift
 // ALIGNMENT, not just the sampled boundaries asserted above. An immediately
 // invoked lambda keeps the check local without adding a named entity to a
 // header (anonymous namespaces are banned in headers by the style rules).
-static_assert([] {
+static_assert([]() consteval {
     for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
         if (SizeClass::Size(i) % SystemConfig::ALIGNMENT != 0) {
             return false;
