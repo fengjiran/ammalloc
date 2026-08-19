@@ -37,6 +37,8 @@ ThreadCache 是分配器的前端缓存：每个线程一个 TLS 实例，处理
 
 - **无锁**：ThreadCache 及其 FreeList 线程私有，唯一 mutator 是拥有线程。
 - **TLS 模型**：`thread_local ThreadCache*`，initial-exec 模型。
+- **无锁前提与代价**：快路径无锁依赖 TLS 私有实例（唯一 mutator 是拥有线程），避免共享 FreeList 的锁/原子/Cache line bouncing；代价是 TLS 访问本身（initial-exec 下为 FS 基址 + 偏移，成本远低于锁与原子竞争，背景见 [research/thread-local-and-thread-cache.md](research/thread-local-and-thread-cache.md)）。
+- **跨线程 free**：`Deallocate` 直接 push 到释放线程自己的 FreeList，不触碰分配线程缓存，快路径保持无锁；代价是缓存归属漂移（对象可能留在非分配线程），由 CentralCache 水位线与 trim 回收平衡（见 §6.2）。
 - **析构顺序**：线程退出 → `ThreadCacheCleaner` 析构 → `ReleaseAll()` 归还 CentralCache → `SystemFree` 释放元数据页；`g_ThreadCacheAlreadyDestructed` 置位防止析构期递归重建。
 
 ## 5. 接口定义
@@ -74,6 +76,7 @@ ThreadCache 是分配器的前端缓存：每个线程一个 TLS 实例，处理
 ## 8. 风险与权衡
 
 - **per-thread 内存占用**：每类配额上限 8×batch，活跃线程多时会持有较多空闲对象；这是无锁快路径的代价，由 CentralCache 水位线与 trim 机制平衡。
+- **TLS 生命周期成本**：线程退出时 `ThreadCacheCleaner` 析构触发全量归还（`ReleaseAll`），线程频繁创建/退出的场景会产生归还风暴；`g_ThreadCacheAlreadyDestructed` 防护析构期递归重建（生命周期问题分析见 [research/thread-local-and-thread-cache.md](research/thread-local-and-thread-cache.md)）。
 - **快路径不含策略**：所有配额决策推迟到冷路径，保证常见分支轻。
 
 ## 9. 测试要点
