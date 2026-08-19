@@ -108,7 +108,7 @@ AM_NOINLINE void* am_malloc_slow_path(size_t original_size) {
         }
     }
 
-    return pTLSThreadCache->Allocate(SizeClass::RoundUp(original_size));
+    return pTLSThreadCache->Allocate(original_size);
 }
 
 AM_NOINLINE void am_free_slow_path(void* ptr, Span* span, size_t aligned_size) {
@@ -129,7 +129,7 @@ AM_NOINLINE void am_free_slow_path(void* ptr, Span* span, size_t aligned_size) {
     }
     // clang-format on
 
-    pTLSThreadCache->Deallocate(ptr, aligned_size);
+    pTLSThreadCache->Deallocate(ptr, span->size_class_idx);
 }
 
 }// namespace
@@ -145,7 +145,7 @@ void* am_malloc(size_t original_size) {
     }
     // clang-format on
 
-    return tc->Allocate(SizeClass::RoundUp(original_size));
+    return tc->Allocate(original_size);
 }
 
 void am_free(void* ptr) {
@@ -167,7 +167,7 @@ void am_free(void* ptr) {
     }
     // clang-format on
 
-    tc->Deallocate(ptr, aligned_size);
+    tc->Deallocate(ptr, span->size_class_idx);
 }
 
 }// namespace ammalloc

@@ -1,6 +1,3 @@
-// Copyright 2026 The AetherMind Authors
-// SPDX-License-Identifier: Apache-2.0
-
 #ifndef AMMALLOC_THREAD_CACHE_H
 #define AMMALLOC_THREAD_CACHE_H
 
@@ -35,26 +32,23 @@ namespace ammalloc {
 class alignas(SystemConfig::CACHE_LINE_SIZE) ThreadCache {
 public:
     ThreadCache() noexcept = default;
-
     ThreadCache(const ThreadCache&) = delete;
     ThreadCache& operator=(const ThreadCache&) = delete;
 
-    /// @brief Allocates one object from the FreeList for `aligned_size`.
+    /// @brief Allocates one object from the FreeList for `original_size`.
     ///
-    /// @param aligned_size Size-class-aligned object size. Callers must pass the
-    ///        internal aligned size, not the original user request.
+    /// @param original_size Raw user request size, not yet rounded to a class
+    ///        boundary. Zero is served from the minimum size class.
     /// @return Pointer to an object slot, or nullptr if the slow path cannot
     ///         refill from CentralCache.
     ///
-    /// @pre `aligned_size > 0`.
-    /// @pre `aligned_size <= SizeConfig::MAX_TC_SIZE`
-    /// @pre `aligned_size == SizeClass::RoundUp(aligned_size)`.
+    /// @pre `original_size <= SizeConfig::MAX_TC_SIZE`
     /// @note The fast path is a single FreeList pop with no locking.
-    AM_NODISCARD AM_ALWAYS_INLINE void* Allocate(size_t aligned_size) noexcept {
-        AMMALLOC_DCHECK(aligned_size > 0);
-        AMMALLOC_DCHECK(aligned_size <= SizeConfig::MAX_TC_SIZE);
-        AMMALLOC_DCHECK(aligned_size == SizeClass::RoundUp(aligned_size));
-        size_t idx = SizeClass::Index(aligned_size);
+    AM_NODISCARD AM_ALWAYS_INLINE void* Allocate(size_t original_size) noexcept {
+        AMMALLOC_DCHECK(original_size <= SizeConfig::MAX_TC_SIZE);
+        // One Index call serves both paths; RoundUp(size) == Size(Index(size))
+        // by construction, so the class size is derived only when needed.
+        size_t idx = SizeClass::Index(original_size);
         auto& list = free_lists_[idx];
 
         // Hot path: satisfy the request entirely from TLS state.
@@ -65,33 +59,33 @@ public:
         // clang-format on
 
         // Refill from CentralCache only after local capacity is exhausted.
-        return FetchFromCentralCache(list, aligned_size);
+        return FetchFromCentralCache(list, SizeClass::Size(idx));
     }
 
     /// @brief Returns one object to its size-class FreeList.
     ///
     /// @param ptr Object pointer being freed.
-    /// @param aligned_size Span-recorded aligned object size.
+    /// @param idx Size-class index recorded in the owning Span
+    ///        (`span->size_class_idx`), avoiding a re-mapping of the object size.
     ///
     /// @pre `ptr != nullptr`
-    /// @pre `aligned_size > 0`.
-    /// @pre `aligned_size <= SizeConfig::MAX_TC_SIZE`
+    /// @pre `idx < SizeClass::kNumSizeClasses`
     /// @note The fast path is a single FreeList push. Slow path is entered only
     ///       when local occupancy reaches the current per-class limit.
-    void AM_ALWAYS_INLINE Deallocate(void* ptr, size_t aligned_size) {
+    void AM_ALWAYS_INLINE Deallocate(void* ptr, size_t idx) {
         AMMALLOC_DCHECK(ptr != nullptr);
-        AMMALLOC_DCHECK(aligned_size <= SizeConfig::MAX_TC_SIZE);
+        AMMALLOC_DCHECK(idx < SizeClass::kNumSizeClasses);
 
-        size_t idx = SizeClass::Index(aligned_size);
         auto& list = free_lists_[idx];
 
         // Hot path: keep recently freed objects local to preserve locality.
         list.push(ptr);
 
         // Crossing the local quota triggers batched trim back to CentralCache.
+        // The class size is needed only on this slow path.
         // clang-format off
         if (list.size() > list.max_size()) AM_UNLIKELY {
-            DeallocateSlowPath(list, aligned_size);
+            DeallocateSlowPath(list, SizeClass::Size(idx));
         }
         // clang-format on
     }

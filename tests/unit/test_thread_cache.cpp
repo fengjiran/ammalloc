@@ -37,10 +37,10 @@ using namespace ammalloc;
 TEST_F(ThreadCacheTest, BasicAllocate) {
     thread_local ThreadCache cache;
 
-    void* ptr = cache.Allocate(SizeClass::RoundUp(16));
+    void* ptr = cache.Allocate(16);
     EXPECT_TRUE(ptr != nullptr);
 
-    cache.Deallocate(ptr, SizeClass::RoundUp(16));
+    cache.Deallocate(ptr, SizeClass::Index(16));
     cache.ReleaseAll();
 }
 
@@ -48,10 +48,10 @@ TEST_F(ThreadCacheTest, BasicAllocate) {
 TEST_F(ThreadCacheTest, AllocateZero) {
     thread_local ThreadCache cache;
 
-    void* ptr = cache.Allocate(SizeClass::RoundUp(0));
+    void* ptr = cache.Allocate(0);
     EXPECT_TRUE(ptr != nullptr);
 
-    cache.Deallocate(ptr, SizeClass::RoundUp(0));
+    cache.Deallocate(ptr, SizeClass::Index(0));
     cache.ReleaseAll();
 }
 
@@ -59,10 +59,10 @@ TEST_F(ThreadCacheTest, AllocateZero) {
 TEST_F(ThreadCacheTest, BasicDeallocate) {
     thread_local ThreadCache cache;
 
-    void* ptr = cache.Allocate(SizeClass::RoundUp(32));
+    void* ptr = cache.Allocate(32);
     EXPECT_TRUE(ptr != nullptr);
 
-    cache.Deallocate(ptr, SizeClass::RoundUp(32));
+    cache.Deallocate(ptr, SizeClass::Index(32));
 
     // ReleaseAll 清理
     cache.ReleaseAll();
@@ -72,9 +72,9 @@ TEST_F(ThreadCacheTest, EdgeCases) {
     thread_local ThreadCache tc;
 
     // 1. size == 0 (应该被提升为最小桶)
-    void* ptr_zero = tc.Allocate(SizeClass::RoundUp(0));
+    void* ptr_zero = tc.Allocate(0);
     EXPECT_TRUE(ptr_zero != nullptr);
-    tc.Deallocate(ptr_zero, SizeClass::RoundUp(0));
+    tc.Deallocate(ptr_zero, SizeClass::Index(0));
 
     // 2. size == MAX_TC_SIZE (32KB)
     size_t max_size = SizeClass::RoundUp(SizeConfig::MAX_TC_SIZE);
@@ -88,7 +88,7 @@ TEST_F(ThreadCacheTest, EdgeCases) {
     EXPECT_EQ(char_ptr[0], 'A');
     EXPECT_EQ(char_ptr[max_size - 1], 'Z');
 
-    tc.Deallocate(ptr_max, max_size);
+    tc.Deallocate(ptr_max, SizeClass::Index(max_size));
     tc.ReleaseAll();
 }
 
@@ -106,7 +106,7 @@ TEST_F(ThreadCacheTest, MultipleAllocateDeallocate) {
     }
 
     for (void* ptr: ptrs) {
-        cache.Deallocate(ptr, size);
+        cache.Deallocate(ptr, SizeClass::Index(size));
     }
 
     cache.ReleaseAll();
@@ -121,7 +121,7 @@ TEST_F(ThreadCacheTest, DifferentSizeClasses) {
         size_t aligned_size = SizeClass::RoundUp(orig_size);
         void* ptr = cache.Allocate(aligned_size);
         EXPECT_TRUE(ptr != nullptr) << "Failed for size " << orig_size;
-        cache.Deallocate(ptr, aligned_size);
+        cache.Deallocate(ptr, SizeClass::Index(aligned_size));
     }
 
     cache.ReleaseAll();
@@ -144,7 +144,7 @@ TEST_F(ThreadCacheTest, ReleaseAll) {
     // 再次分配应该正常工作
     void* ptr = cache.Allocate(size);
     EXPECT_TRUE(ptr != nullptr);
-    cache.Deallocate(ptr, size);
+    cache.Deallocate(ptr, SizeClass::Index(size));
     cache.ReleaseAll();
 }
 
@@ -172,7 +172,7 @@ TEST_F(ThreadCacheTest, SlowStartAndScavenge) {
     // 2. 持续释放，触发 ReleaseTooLongList
     // 当释放数量超过 limit (1024) 时，会触发批量归还
     for (void* ptr: ptrs) {
-        tc.Deallocate(ptr, size);
+        tc.Deallocate(ptr, SizeClass::Index(size));
     }
 
     // 3. 清理残留
@@ -195,7 +195,7 @@ TEST_F(ThreadCacheTest, TriggerReleaseTooLongList) {
 
     // 释放所有对象，触发 ReleaseTooLongList
     for (void* ptr: ptrs) {
-        cache.Deallocate(ptr, size);
+        cache.Deallocate(ptr, SizeClass::Index(size));
     }
 
     cache.ReleaseAll();
@@ -239,7 +239,7 @@ TEST_F(ThreadCacheTest, SlowStartGrowthThenOveragesShrinkMaxSize) {
     bool observed_shrink = false;
 
     for (void* ptr: ptrs) {
-        cache.Deallocate(ptr, size);
+        cache.Deallocate(ptr, SizeClass::Index(size));
         max_observed_overages = std::max(max_observed_overages, cache.GetOveragesForTest(idx));
 
         const size_t current_max_size = cache.GetMaxSizeForTest(idx);
@@ -278,7 +278,7 @@ TEST_F(ThreadCacheTest, StressTest) {
     // 随机释放
     std::shuffle(allocated.begin(), allocated.end(), g);
     for (auto& [ptr, size]: allocated) {
-        cache.Deallocate(ptr, size);
+        cache.Deallocate(ptr, SizeClass::Index(size));
     }
 
     cache.ReleaseAll();
@@ -314,7 +314,7 @@ void ThreadRoutine(int thread_id, size_t iterations) {
             void* ptr = allocated_ptrs[idx];
             size_t aligned_size = *static_cast<size_t*>(ptr);// 读出大小
 
-            tc.Deallocate(ptr, aligned_size);
+            tc.Deallocate(ptr, SizeClass::Index(aligned_size));
 
             // 移除并替换最后一个元素
             allocated_ptrs[idx] = allocated_ptrs.back();
@@ -325,7 +325,7 @@ void ThreadRoutine(int thread_id, size_t iterations) {
     // 线程退出前，释放所有剩余内存
     for (void* ptr: allocated_ptrs) {
         size_t aligned_size = *static_cast<size_t*>(ptr);
-        tc.Deallocate(ptr, aligned_size);
+        tc.Deallocate(ptr, SizeClass::Index(aligned_size));
     }
 
     // 归还 ThreadCache 缓存到 CentralCache
@@ -374,7 +374,7 @@ TEST_F(ThreadCacheTest, MultiThreadedAllocation) {
                 void* ptr = cache.Allocate(size);
                 if (ptr) {
                     success_count.fetch_add(1);
-                    cache.Deallocate(ptr, size);
+                    cache.Deallocate(ptr, SizeClass::Index(size));
                 }
             }
             cache.ReleaseAll();
@@ -406,7 +406,7 @@ TEST_F(ThreadCacheTest, MultiThreadedDifferentSizes) {
                 void* ptr = cache.Allocate(aligned_size);
                 if (ptr) {
                     success_count.fetch_add(1);
-                    cache.Deallocate(ptr, aligned_size);
+        cache.Deallocate(ptr, SizeClass::Index(aligned_size));
                 }
             }
             cache.ReleaseAll();
@@ -428,7 +428,7 @@ TEST_F(ThreadCacheTest, SmallObjectAllocation) {
     for (int i = 0; i < 100; ++i) {
         void* ptr = cache.Allocate(size);
         EXPECT_NE(ptr, nullptr);
-        cache.Deallocate(ptr, size);
+        cache.Deallocate(ptr, SizeClass::Index(size));
     }
 
     cache.ReleaseAll();
@@ -441,7 +441,7 @@ TEST_F(ThreadCacheTest, BoundarySizeAllocation) {
 
     void* ptr = cache.Allocate(max_size);
     EXPECT_NE(ptr, nullptr);
-    cache.Deallocate(ptr, max_size);
+    cache.Deallocate(ptr, SizeClass::Index(max_size));
 
     cache.ReleaseAll();
 }
@@ -459,7 +459,7 @@ TEST_F(ThreadCacheTest, RepeatedAllocateDeallocate) {
             ptrs.push_back(ptr);
         }
         for (void* ptr: ptrs) {
-            cache.Deallocate(ptr, size);
+            cache.Deallocate(ptr, SizeClass::Index(size));
         }
     }
 
@@ -482,7 +482,7 @@ TEST_F(ThreadCacheTest, FetchFromCentralCacheTrigger) {
     }
 
     for (void* ptr: ptrs) {
-        cache.Deallocate(ptr, size);
+        cache.Deallocate(ptr, SizeClass::Index(size));
     }
 
     cache.ReleaseAll();
@@ -510,7 +510,7 @@ TEST_F(ThreadCacheTest, BenchmarkVsStdMalloc) {
     for (size_t i = 0; i < iterations; ++i) {
         void* p = tc.Allocate(alloc_size);
         // benchmark::DoNotOptimize(p);
-        tc.Deallocate(p, alloc_size);
+        tc.Deallocate(p, SizeClass::Index(alloc_size));
     }
     tc.ReleaseAll();
     auto end_tc = std::chrono::high_resolution_clock::now();
