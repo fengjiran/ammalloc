@@ -3,6 +3,7 @@
 
 /// @file
 /// @brief Public allocation and deallocation entry points for ammalloc.
+/// @see docs/designs/ammalloc_design.md, docs/api/public-api.md
 
 #include <cstddef>
 

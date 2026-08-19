@@ -3,6 +3,7 @@
 
 /// @file
 /// @brief Span metadata, bitmap allocation, and intrusive Span lists.
+/// @see docs/designs/07-span-and-pagemap.md
 
 #include "ammalloc/assert.h"
 #include "ammalloc/common.h"

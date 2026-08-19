@@ -3,6 +3,7 @@
 
 /// @file
 /// @brief Background reclamation of physical pages from idle PageCache spans.
+/// @see docs/designs/06-page-heap-scavenger.md, docs/decisions/0001-scavenger-startup-strategy.md
 
 #include <condition_variable>
 #include <stop_token>

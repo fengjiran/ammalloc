@@ -6,6 +6,7 @@
 ///
 /// Small sizes use compile-time lookup tables; larger ThreadCache sizes use a
 /// fixed number of bit operations.
+/// @see docs/designs/01-size-class.md
 
 #include "ammalloc/assert.h"
 #include "ammalloc/config.h"

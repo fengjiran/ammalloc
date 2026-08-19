@@ -7,6 +7,7 @@
 /// PageCache manages Span splitting, owner-shard-local coalescing, and fallback
 /// to PageAllocator. PageMap publishes `PageID -> Span*` mappings through a
 /// fixed-depth radix tree whose lookup path performs only atomic loads.
+/// @see docs/designs/04-page-cache.md, docs/designs/07-span-and-pagemap.md
 
 #define USE_PAGECACHE_SHARD
 

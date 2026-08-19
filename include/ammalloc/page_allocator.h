@@ -7,6 +7,7 @@
 /// `PageAllocator` wraps `mmap`, `munmap`, and `madvise`, including an internal
 /// lock-free cache for standard 2 MiB mappings. `ObjectPool` uses those pages to
 /// recycle fixed-size metadata without recursively entering `am_malloc`.
+/// @see docs/designs/05-page-allocator.md
 
 #include "ammalloc/config.h"
 
