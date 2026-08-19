@@ -45,7 +45,7 @@ public:
     /// @pre `original_size <= SizeConfig::MAX_TC_SIZE`
     /// @note The fast path is a single FreeList pop with no locking.
     AM_NODISCARD AM_ALWAYS_INLINE void* Allocate(size_t original_size) noexcept {
-        AMMALLOC_DCHECK(original_size <= SizeConfig::MAX_TC_SIZE);
+        AM_DCHECK(original_size <= SizeConfig::MAX_TC_SIZE);
         // One Index call serves both paths; RoundUp(size) == Size(Index(size))
         // by construction, so the class size is derived only when needed.
         size_t idx = SizeClass::Index(original_size);
@@ -73,8 +73,8 @@ public:
     /// @note The fast path is a single FreeList push. Slow path is entered only
     ///       when local occupancy reaches the current per-class limit.
     void AM_ALWAYS_INLINE Deallocate(void* ptr, size_t idx) {
-        AMMALLOC_DCHECK(ptr != nullptr);
-        AMMALLOC_DCHECK(idx < SizeClass::kNumSizeClasses);
+        AM_DCHECK(ptr != nullptr);
+        AM_DCHECK(idx < SizeClass::kNumSizeClasses);
 
         auto& list = free_lists_[idx];
 
@@ -101,7 +101,7 @@ public:
     /// @return Current maximum local object count.
     /// @pre `idx < SizeClass::kNumSizeClasses`.
     AM_NODISCARD size_t GetMaxSizeForTest(size_t idx) const noexcept {
-        AMMALLOC_DCHECK(idx < free_lists_.size());
+        AM_DCHECK(idx < free_lists_.size());
         return free_lists_[idx].max_size();
     }
 
@@ -110,7 +110,7 @@ public:
     /// @return Consecutive overflow-trim count.
     /// @pre `idx < SizeClass::kNumSizeClasses`.
     AM_NODISCARD size_t GetOveragesForTest(size_t idx) const noexcept {
-        AMMALLOC_DCHECK(idx < free_lists_.size());
+        AM_DCHECK(idx < free_lists_.size());
         return free_lists_[idx].overages();
     }
 

@@ -175,7 +175,7 @@ TEST(SizeClassTest, SafeSizeBounds) {
 }
 
 TEST(SizeClassTest, SafeSizeOutOfRange_Death) {
-    // SafeSize uses AMMALLOC_CHECK, which is active in every build (not
+    // SafeSize uses AM_CHECK, which is active in every build (not
     // debug-only), so no #ifndef NDEBUG guard is needed here.
     EXPECT_DEATH(SizeClass::SafeSize(SizeClass::kNumSizeClasses), "Check failed");
 }

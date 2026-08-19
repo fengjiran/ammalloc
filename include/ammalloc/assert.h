@@ -21,7 +21,7 @@ namespace ammalloc::detail {
 /// @brief Reports a failed check at a captured source location and aborts.
 /// @param condition Text of the failed condition.
 /// @param loc Source location of the check expression.
-/// @note Use `AMMALLOC_CHECK` to capture the call-site location automatically.
+/// @note Use `AM_CHECK` to capture the call-site location automatically.
 inline void HandleCheckFailed(std::string_view condition, std::source_location loc) {
     std::cerr << std::format("Check failed: ({}) at {}:{}:{}\n",
                              condition, loc.file_name(), loc.line(), loc.column());
@@ -55,7 +55,7 @@ void HandleCheckFailed(std::string_view condition,
 ///             message.
 /// @note This macro is active in every build. The `Check failed` output prefix
 ///       is part of the death-test contract.
-#define AMMALLOC_CHECK(condition, ...)                                                       \
+#define AM_CHECK(condition, ...)                                                             \
     do {                                                                                     \
         if (!(condition)) [[unlikely]] {                                                     \
             ::ammalloc::detail::HandleCheckFailed(                                           \
@@ -72,12 +72,12 @@ void HandleCheckFailed(std::string_view condition,
 /// @note The release expansion consumes its internal dangling `else` when the
 ///       invocation ends with a semicolon, preserving an enclosing `if`/`else`.
 #ifdef NDEBUG
-#define AMMALLOC_DCHECK(condition, ...)               \
+#define AM_DCHECK(condition, ...)               \
     while (false)                                     \
         if (static_cast<bool>(condition)) [[likely]]; \
         else
 #else
-#define AMMALLOC_DCHECK(condition, ...) AMMALLOC_CHECK(condition __VA_OPT__(, ) __VA_ARGS__)
+#define AM_DCHECK(condition, ...) AM_CHECK(condition __VA_OPT__(, ) __VA_ARGS__)
 #endif
 
 #endif// AMMALLOC_ASSERT_H

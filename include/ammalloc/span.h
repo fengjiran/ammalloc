@@ -151,7 +151,7 @@ public:
     /// @pre The lock protecting this list is held.
     /// @pre `pos` and `span` are non-null, and `span` is not already linked.
     static void insert(Span* pos, Span* span) noexcept {
-        AMMALLOC_DCHECK(pos != nullptr && span != nullptr);
+        AM_DCHECK(pos != nullptr && span != nullptr);
         span->next = pos;
         span->prev = pos->prev;
         span->prev->next = span;
@@ -171,7 +171,7 @@ public:
     /// @return Node following the removed Span, possibly `end()`.
     /// @pre The lock protecting this list is held.
     Span* erase(Span* span) noexcept {
-        AMMALLOC_DCHECK(span != nullptr && span != &head_);
+        AM_DCHECK(span != nullptr && span != &head_);
         auto* prev = span->prev;
         auto* next = span->next;
         prev->next = next;

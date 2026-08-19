@@ -188,7 +188,7 @@ public:
     /// @brief Returns a bucket size after enforcing index bounds.
     ///
     /// Debugging/contract-checking interface: an out-of-range `idx` triggers
-    /// `AMMALLOC_CHECK(false)` and aborts the process. The returned 0 is
+    /// `AM_CHECK(false)` and aborts the process. The returned 0 is
     /// unreachable in practice.
     ///
     /// @param idx The size class index.
@@ -196,7 +196,7 @@ public:
     AM_ALWAYS_INLINE static size_t SafeSize(size_t idx) noexcept {
         // clang-format off
         if (idx >= kNumSizeClasses) AM_UNLIKELY {
-            AMMALLOC_CHECK(false, "SizeClass::Size index {} out of range [0, {})", idx, kNumSizeClasses);
+            AM_CHECK(false, "SizeClass::Size index {} out of range [0, {})", idx, kNumSizeClasses);
             return 0;
         }
         // clang-format on

@@ -4,7 +4,7 @@
 namespace ammalloc {
 
 void Span::Init(size_t aligned_object_size) {
-    AMMALLOC_DCHECK(aligned_object_size > 0 && aligned_object_size <= std::numeric_limits<uint32_t>::max());
+    AM_DCHECK(aligned_object_size > 0 && aligned_object_size <= std::numeric_limits<uint32_t>::max());
     aligned_obj_size = static_cast<uint32_t>(aligned_object_size);
     size_class_idx = SizeClass::Index(aligned_obj_size);
     void* start_ptr = detail::PageIDToPtr(start_page_idx);
@@ -72,9 +72,9 @@ void* Span::AllocObject() {
 
 void Span::FreeObject(void* ptr) {
     const char* base_ptr = static_cast<char*>(GetDataBasePtr());
-    AMMALLOC_DCHECK(static_cast<char*>(ptr) >= base_ptr, "Pointer underflow detected!");
+    AM_DCHECK(static_cast<char*>(ptr) >= base_ptr, "Pointer underflow detected!");
     size_t offset = static_cast<char*>(ptr) - base_ptr;
-    AMMALLOC_DCHECK(offset % aligned_obj_size == 0);
+    AM_DCHECK(offset % aligned_obj_size == 0);
     size_t global_obj_idx = 0;
     // clang-format off
     if (std::has_single_bit(static_cast<size_t>(aligned_obj_size))) AM_LIKELY {
@@ -85,11 +85,11 @@ void Span::FreeObject(void* ptr) {
     // clang-format on
 
     auto bitmap_idx = static_cast<uint32_t>(global_obj_idx >> 6);
-    AMMALLOC_DCHECK(bitmap_idx < GetBitmapNum());
+    AM_DCHECK(bitmap_idx < GetBitmapNum());
     int bit_pos = static_cast<int>(global_obj_idx & 63);
     uint64_t mask = 1ull << bit_pos;
     auto* bitmap = GetBitmap();
-    AMMALLOC_DCHECK((bitmap[bitmap_idx] & mask) == 0, "double free detected.");
+    AM_DCHECK((bitmap[bitmap_idx] & mask) == 0, "double free detected.");
     bitmap[bitmap_idx] |= mask;
     --use_count;
     scan_cursor = std::min(scan_cursor, bitmap_idx);

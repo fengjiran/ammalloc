@@ -54,7 +54,7 @@ void PageMap::SetSpan(Span* span) {
         for (auto& child: curr->children) {
             child.store(nullptr, std::memory_order_relaxed);
         }
-        AMMALLOC_DCHECK((reinterpret_cast<uintptr_t>(curr) & (4096 - 1)) == 0);
+        AM_DCHECK((reinterpret_cast<uintptr_t>(curr) & (4096 - 1)) == 0);
         root_.store(curr, std::memory_order_release);
     }
 
@@ -71,21 +71,21 @@ void PageMap::SetSpan(Span* span) {
         auto* p1 = static_cast<RadixNode*>(curr->children[i0].load(std::memory_order_relaxed));
         if (!p1) {
             p1 = radix_node_pool_.New();
-            AMMALLOC_DCHECK((reinterpret_cast<uintptr_t>(p1) & (4096 - 1)) == 0);
+            AM_DCHECK((reinterpret_cast<uintptr_t>(p1) & (4096 - 1)) == 0);
             curr->children[i0].store(p1, std::memory_order_release);
         }
 
         auto* p2 = static_cast<RadixNode*>(p1->children[i1].load(std::memory_order_relaxed));
         if (!p2) {
             p2 = radix_node_pool_.New();
-            AMMALLOC_DCHECK((reinterpret_cast<uintptr_t>(p2) & (4096 - 1)) == 0);
+            AM_DCHECK((reinterpret_cast<uintptr_t>(p2) & (4096 - 1)) == 0);
             p1->children[i1].store(p2, std::memory_order_release);
         }
 
         auto* p3 = static_cast<RadixNode*>(p2->children[i2].load(std::memory_order_relaxed));
         if (!p3) {
             p3 = radix_node_pool_.New();
-            AMMALLOC_DCHECK((reinterpret_cast<uintptr_t>(p3) & (4096 - 1)) == 0);
+            AM_DCHECK((reinterpret_cast<uintptr_t>(p3) & (4096 - 1)) == 0);
             p2->children[i2].store(p3, std::memory_order_release);
         }
 
@@ -186,7 +186,7 @@ Span* PageCacheShard::AllocSpanLocked(size_t page_num) {
         }
         // clang-format on
 
-        AMMALLOC_DCHECK(page_num >= 1 && page_num <= PageConfig::MAX_PAGE_NUM);
+        AM_DCHECK(page_num >= 1 && page_num <= PageConfig::MAX_PAGE_NUM);
         if (!span_lists_[page_num].empty()) {
             auto* span = span_lists_[page_num].pop_front();
             span->SetUsed(true);
@@ -201,9 +201,9 @@ Span* PageCacheShard::AllocSpanLocked(size_t page_num) {
             }
 
             auto* big_span = span_lists_[i].pop_front();
-            AMMALLOC_DCHECK(big_span != nullptr);
-            AMMALLOC_DCHECK(big_span->page_num == i);
-            AMMALLOC_DCHECK(!big_span->IsUsed());
+            AM_DCHECK(big_span != nullptr);
+            AM_DCHECK(big_span->page_num == i);
+            AM_DCHECK(!big_span->IsUsed());
             Span* small_span = nullptr;
             try {
                 small_span = span_pool_.New(big_span->start_page_idx, static_cast<uint32_t>(page_num));
@@ -252,7 +252,7 @@ Span* PageCacheShard::AllocSpanLocked(size_t page_num) {
 }
 
 void PageCacheShard::ReleaseSpanLocked(Span* span) noexcept {
-    AMMALLOC_DCHECK(span != nullptr);
+    AM_DCHECK(span != nullptr);
     // Oversized Spans are never retained in page-count buckets.
     // clang-format off
     if (span->page_num > PageConfig::MAX_PAGE_NUM) AM_UNLIKELY {
@@ -314,7 +314,7 @@ void PageCacheShard::ResetLocked() {
     for (auto& list: span_lists_) {
         while (!list.empty()) {
             auto* span = list.pop_front();
-            AMMALLOC_DCHECK(span != nullptr);
+            AM_DCHECK(span != nullptr);
             PageAllocator::SystemFree(span->GetPageBaseAddr(), span->page_num);
             span_pool_.Delete(span);
         }
@@ -336,7 +336,7 @@ Span* PageCache::AllocSpan(size_t page_num) {
 }
 
 void PageCache::ReleaseSpan(Span* span) noexcept {
-    AMMALLOC_DCHECK(span != nullptr);
+    AM_DCHECK(span != nullptr);
     auto& shard = OwnerShard(span);
     std::lock_guard<std::mutex> lock(shard.GetMutex());
     shard.ReleaseSpanLocked(span);
@@ -382,7 +382,7 @@ Span* PageCache::AllocSpanLocked(size_t page_num) {
         }
         // clang-format on
 
-        AMMALLOC_DCHECK(page_num >= 1 && page_num <= PageConfig::MAX_PAGE_NUM);
+        AM_DCHECK(page_num >= 1 && page_num <= PageConfig::MAX_PAGE_NUM);
         if (!span_lists_[page_num].empty()) {
             auto* span = span_lists_[page_num].pop_front();
             span->SetUsed(true);
