@@ -2,6 +2,12 @@
 
 > ammalloc 内存分配器的尺寸分级系统设计
 
+- **状态**: Current（描述已验证实现）
+- **关联代码**: [include/ammalloc/size_class.h](../../include/ammalloc/size_class.h)（全部实现位于头文件：consteval 表生成 + static_assert 校验，无 `.cpp` 实现文件）
+- **关联测试**: [tests/unit/test_size_class.cpp](../../tests/unit/test_size_class.cpp)
+- **关联基准**: [tests/benchmark/benchmark_size_class.cpp](../../tests/benchmark/benchmark_size_class.cpp)
+- **架构总览**: [ammalloc_design.md §5.4](ammalloc_design.md)
+
 ---
 
 ## 1. 设计目标与背景
@@ -25,9 +31,9 @@
 
 ### 1.3 设计参考
 
-本设计基于 **Google TCMalloc** 的尺寸分级策略：
+本设计采用 **jemalloc 风格**的阶梯映射策略（与 `size_class.h` 类注释一致）：
 - 小对象（≤128B）：线性映射，按 `SystemConfig::ALIGNMENT`（默认 16B）对齐
-- 大对象（>128B）：对数步进，每 2^k 区间分成 4 步
+- 大对象（>128B）：对数步进，每 2^k 区间分成 4 步（`kStepsPerGroup = 4`）
 
 ---
 
@@ -60,7 +66,7 @@ if (size > SizeConfig::MAX_TC_SIZE) return std::numeric_limits<size_t>::max();
   * 映射接口：`Index(0) -> 0`，`RoundUp(0) -> ALIGNMENT (16)`
   * 策略接口：`CalculateBatchSize(0) -> 0`，`GetMovePageNum(0) -> 0`
   * 这样既支持上层 `malloc(0)` 风格语义，又避免 batch/page 策略对零尺寸做无意义计算。
-* **越界检查**：超过 `ThreadCache` 阈值的直接交由 `PageCache` 处理。
+* **越界检查**：`MAX_TC_SIZE` 防御位于 `SizeClass::Index()` 入口（`AM_UNLIKELY` 分支），`detail::CalculateIndex` 本身不检查上限；`Index` 返回 `max()` 哨兵后，`RoundUp` 对超大值原样透传，由调用方（如 `am_malloc`）将超大请求直接交由 `PageCache` 处理。
 
 ### 2.2 线性映射区 (1 ~ 128 Bytes)
 
@@ -202,10 +208,18 @@ namespace ammalloc {
         // 批量策略
         static size_t CalculateBatchSize(size_t size) noexcept;
         static size_t GetMovePageNum(size_t size) noexcept;
+
+        // 常量
+        static constexpr size_t kNumSizeClasses;  // = CalculateIndex(MAX_TC_SIZE) + 1（默认 40）
+        static constexpr size_t kMaxBatchSize;    // = 512
         
     private:
+        // 私有辅助
+        static size_t BatchByIndex(size_t idx) noexcept;      // 查 batch_table_
+        static size_t MovePagesByIndex(size_t idx) noexcept;  // 查 move_page_table_
+
         // 编译期表
-        static auto small_index_table_;  // [0, kSmallSizeThreshold] 快速查表
+        static auto small_index_table_;  // uint8_t[1025]，[0, kSmallSizeThreshold] 快速查表
         static auto size_table_;         // index -> class size
         static auto batch_table_;        // index -> batch size
         static auto move_page_table_;    // index -> span page count
@@ -272,9 +286,9 @@ static constexpr size_t Index(size_t size) noexcept {
 }
 ```
 
-1. **编译期常量表 (`consteval`)**：利用上述纯数学算法，在**编译期**直接生成 1024 字节以内的查找表。
+1. **编译期常量表 (`consteval`)**：利用上述纯数学算法，在**编译期**直接生成 `uint8_t[1025]` 查表（覆盖 `[0, 1024]`；索引可压缩为单字节依赖 `kNumSizeClasses <= uint8_t::max()` 的 static_assert 保证）。
 2. **热路径降维**：95% 以上的内存分配都在 1KB 以内。通过 `AM_LIKELY` 提示，CPU 会直接执行一条内存读取指令 `movzx eax, byte ptr [table + size]`。
-3. **耗时对比**：将原本需要 ~15ns 的位运算，降维打击至 **~3ns**（L1 Cache 命中）。
+3. **耗时对比**：将数条串行位运算（`bit_width` + 移位 + 掩码）降为单次 L1 读取；具体收益以 `BM_SizeClass_Index_*` 与 `BM_SizeClass_Size/RoundUp_*` 基准对比为准，不在文档中断言绝对值。
 
 ### 4.3 分支预测提示
 
@@ -299,11 +313,14 @@ AM_ALWAYS_INLINE constexpr static size_t Index(size_t size) noexcept {
 ### 4.4 强制内联
 
 ```cpp
+AM_ALWAYS_INLINE static constexpr size_t Index(size_t size) noexcept;
 AM_ALWAYS_INLINE static constexpr size_t Size(size_t idx) noexcept;
 AM_ALWAYS_INLINE static constexpr size_t RoundUp(size_t size) noexcept;
+AM_ALWAYS_INLINE static constexpr size_t GetMovePageNum(size_t size) noexcept;
 ```
 
 **理由**: 这些函数在分配/释放热路径上被频繁调用，内联消除函数调用开销。
+（注：`CalculateBatchSize` 未标注强制内联——属策略接口，调用频率较低，由编译器自行决定。）
 
 ### 4.5 位运算优化
 
@@ -404,6 +421,15 @@ static_assert(std::has_single_bit(SizeConfig::MAX_TC_SIZE));
 static_assert(SizeClass::Size(SizeClass::kNumSizeClasses - 1) == SizeConfig::MAX_TC_SIZE);
 ```
 
+此外，当前实现还锁定了以下不变量（见 `size_class.h` 文件尾）：
+
+- 几何组 1 边界：`CalculateSize(kLinearBucketCount + 4) == 320`（256 + 64）
+- 线性区端点：`CalculateIndex(1) == 0`、`CalculateIndex(ALIGNMENT + 1) == 1`、`CalculateIndex(128) == kLinearBucketCount - 1`
+- 表索引可压缩：`kNumSizeClasses <= uint8_t::max()`（`small_index_table_` 元素为 `uint8_t` 的前提）
+- 策略接口锁定 constexpr：`CalculateBatchSize(ALIGNMENT) == kMaxBatchSize`、`GetMovePageNum(ALIGNMENT) > 0`（未来若把运行时调用拉入策略接口会在此编译失败）
+- 对齐几何不变量：`kStepShift < kLinearMsb`（防止几何步长下溢）、`kSmallLinearLimit % ALIGNMENT == 0`（强制 ALIGNMENT 为 2 的幂）
+- **全类穷举**：IIFE consteval lambda 遍历全部 `kNumSizeClasses` 验证 `Size(i) % ALIGNMENT == 0`
+
 除了代表点 `static_assert` 之外，当前实现还增加了采样式 consteval 校验，用于验证：
 
 - `Index(s)` 在 class 边界上可映射到合法索引
@@ -418,25 +444,45 @@ static_assert(SizeClass::Size(SizeClass::kNumSizeClasses - 1) == SizeConfig::MAX
 TEST(SizeClassTest, ComprehensiveRoundTrip) {
     for (size_t sz = 1; sz <= SizeConfig::MAX_TC_SIZE; ++sz) {
         size_t idx = SizeClass::Index(sz);
+
+        // 验证: 索引合法
+        EXPECT_LT(idx, SizeClass::kNumSizeClasses);
         size_t bucket_size = SizeClass::Size(idx);
-        
+
         // 验证: bucket_size >= sz
         EXPECT_GE(bucket_size, sz);
-        
+
+        // 验证: 映射稳定（Index(aligned) == idx）
+        EXPECT_EQ(SizeClass::Index(bucket_size), idx);
+
         // 验证: 前一个桶的尺寸 < sz
         if (idx > 0) {
-            EXPECT_LT(SizeClass::Size(idx - 1), sz);
+            EXPECT_GT(sz, SizeClass::Size(idx - 1));
         }
     }
 }
 ```
 
-此外，当前单测还覆盖了 invalid-input 契约：
+除 `ComprehensiveRoundTrip` 外，当前测试套件还覆盖：
 
-- `RoundUp(size > MAX_TC_SIZE)` 原样透传
-- `CalculateBatchSize(0) == 0`
-- `GetMovePageNum(0) == 0`
-- `Index(size > MAX_TC_SIZE) == max()`
+| 测试 | 验证内容 |
+|------|----------|
+| `SmallObjectMapping` / `LargeObjectMapping` | 线性区与几何区边界映射（0/1/16/128/129/160/192/256/257/320） |
+| `MaxSizeBoundary` | `MAX_TC_SIZE` 恰好落在类边界；超界返回 `max()` 哨兵 |
+| `RoundUp` | 取整语义与 `MAX_TC_SIZE` 透传语义 |
+| `AllClassesAlignedToSystemAlignment` | 全部类大小为 ALIGNMENT 倍数 |
+| `BatchConfiguration` / `BatchStrategy` | batch 上限 512 / 下限 2 / 1KiB→32；Span 覆盖 ≥ 8×batch |
+| `BatchMonotonicNonIncreasing` | batch 随类增大单调不增 |
+| `MovePageConfiguration` / `MovePageMinFloor32KiB` | 页数 ∈ [1, `MAX_PAGE_NUM`]；Span 字节数 ≥ 32 KiB |
+| `FragmentationAnalysis` | 全范围 [1, 32768] 累计平均碎片 < 12.5% |
+| `SafeSizeBounds` / `SafeSizeOutOfRange_Death` | 合法取值；越界触发 `AM_CHECK`（`AMMALLOC_CHECK` 在所有构建生效，death test 匹配 `"Check failed"`） |
+
+invalid-input 契约（`SizeClassInvalidInput.*` 套件）：
+
+- `RoundUpOverMaxTcSize`：`RoundUp(size > MAX_TC_SIZE)` 原样透传（`MAX_TC_SIZE + 1`、`MAX_TC_SIZE + 1001`）
+- `CalculateBatchSizeWithZero` / `GetMovePageNumWithZero`：`0` 输入返回 `0`
+- `IndexReturnsMaxForInvalid`：`Index(size > MAX_TC_SIZE) == max()`
+- `CalculateBatchSizeOverMaxTcSize` / `GetMovePageNumOverMaxTcSize`：超界输入返回 `0`
 
 ### 6.3 内部碎片统计
 
@@ -446,7 +492,7 @@ TEST(SizeClassTest, FragmentationAnalysis) {
     size_t total_alloc = 0;
     
     for (size_t sz = 1; sz <= 32768; ++sz) {
-        size_t bucket = SizeClass::Size(SizeClass::Index(sz));
+        size_t bucket = SizeClass::RoundUp(sz);
         total_waste += (bucket - sz);
         total_alloc += bucket;
     }
@@ -479,13 +525,13 @@ size_t aligned = SizeClass::RoundUp(150);  // aligned = 160
 
 ```cpp
 void* am_malloc(size_t size) {
-    // 1. 超过 ThreadCache 阈值的请求直接走慢路径
-    if (size > SizeConfig::MAX_TC_SIZE) {
+    // 1. 超过 ThreadCache 阈值或 TLS 未初始化 → 慢路径
+    if (size > SizeConfig::MAX_TC_SIZE || pTLSThreadCache == nullptr) AM_UNLIKELY {
         return am_malloc_slow_path(size);
     }
 
-    // 2. 小对象走 ThreadCache 快路径
-    return ThreadCache::GetCurrentThreadCache()->Allocate(size);
+    // 2. 小对象走 ThreadCache 快路径（内部完成 RoundUp + Index）
+    return pTLSThreadCache->Allocate(size);
 }
 ```
 
@@ -500,7 +546,7 @@ Span* CentralCache::GetOneSpan(size_t class_size) {
     size_t page_num = SizeClass::GetMovePageNum(class_size);
     
     // 2. 从 PageCache 申请 Span
-    Span* span = PageCache::GetInstance().AllocSpan(page_num, class_size);
+    Span* span = PageCache::GetInstance().AllocSpan(page_num);
     
     // 3. 初始化 Span...
 }
@@ -555,11 +601,11 @@ Span* CentralCache::GetOneSpan(size_t class_size) {
 
 | 表 | 大小 | 说明 |
 |----|------|------|
-| `small_index_table_` | 1025 bytes | size 0-1024 的索引 |
-| `size_table_` | 40 × 4 bytes | index -> class size |
-| `batch_table_` | 40 × 2 bytes | index -> batch size |
-| `move_page_table_` | 40 × 2 bytes | index -> page count |
-| **总计** | **约 1.4 KB** | 代码段，只读 |
+| `small_index_table_` | 1025 bytes | `uint8_t[1025]`，size 0-1024 的索引 |
+| `size_table_` | 40 × 4 bytes | `uint32_t[40]`，index -> class size |
+| `batch_table_` | 40 × 2 bytes | `uint16_t[40]`，index -> batch size |
+| `move_page_table_` | 40 × 2 bytes | `uint16_t[40]`，index -> page count |
+| **总计** | **1345 B ≈ 1.3 KiB** | 代码段，只读 |
 
 ### 9.3 缓存行为
 
@@ -579,7 +625,9 @@ Span* CentralCache::GetOneSpan(size_t class_size) {
 // 线性区步长与桶数、大对象组起始下标全部由 ALIGNMENT 推导，
 // 修改 ALIGNMENT 后 static_assert 与测试自动验证新类表。
 // 编译期强制约束（static_assert）：
-//   - kSmallLinearLimit % ALIGNMENT == 0        （线性区桶数为整数）
+//   - kSmallLinearLimit % ALIGNMENT == 0        （线性区桶数为整数；128 的约数皆为 2 的幂，
+//                                                  故同时保证 countr_zero 精确）
+//   - kStepShift < kLinearMsb                   （防止几何步长下溢）
 //   - (kSmallLinearLimit >> kStepShift) % ALIGNMENT == 0  （最小几何步长对齐）
 //   - kStepsPerGroup == 1 << kStepShift         （桶掩码精确）
 // 并遍历全部类验证 Size(idx) % ALIGNMENT == 0
@@ -591,9 +639,13 @@ Span* CentralCache::GetOneSpan(size_t class_size) {
 
 ```cpp
 // 修改 SizeConfig::MAX_TC_SIZE
-// kNumSizeClasses 会自动计算
+// kNumSizeClasses 会自动计算（= CalculateIndex(MAX_TC_SIZE) + 1）
 // 重新验证 static_assert
 ```
+
+注意两个硬约束：
+- `MAX_TC_SIZE` 必须保持 **2 的幂**（`static_assert(has_single_bit)`，保证恰好落在类边界）
+- `kNumSizeClasses <= uint8_t::max()`（`small_index_table_` 元素为 `uint8_t`；若新上限使类数超过 255，需将表元素扩为 `uint16_t`）
 
 ### 10.3 调整步数
 
@@ -617,7 +669,7 @@ Span* CentralCache::GetOneSpan(size_t class_size) {
 
 ---
 
-**文档版本**: 2.2  
-**最后更新**: 2026-08-18  
+**文档版本**: 2.3  
+**最后更新**: 2026-08-19  
 **设计状态**: 已实施并验证  
 **相关文件**: `ammalloc/include/ammalloc/size_class.h`

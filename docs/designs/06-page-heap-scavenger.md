@@ -1,5 +1,11 @@
 # PageHeap Scavenger 设计方案 (ammalloc 内存归还机制)
 
+- **状态**: Current（描述已验证实现）
+- **关联代码**: [include/ammalloc/page_heap_scavenger.h](../../include/ammalloc/page_heap_scavenger.h)、[src/page_heap_scavenger.cpp](../../src/page_heap_scavenger.cpp)、[src/ammalloc.cpp](../../src/ammalloc.cpp)（`EnsureScavengerStarted`）
+- **关联测试**: [tests/unit/test_thread_cache.cpp](../../tests/unit/test_thread_cache.cpp)（`SlowStartAndScavenge`）
+- **决策记录**: [ADR-0001](../decisions/0001-scavenger-startup-strategy.md)（启动时机策略）
+- **架构总览**: [ammalloc_design.md §5.8](ammalloc_design.md)
+
 ## 1. 背景与目标 (Context & Goals)
 `ammalloc` 目前采用三层缓存架构，虽然实现了高效的内存分配与复用，但缺乏主动将物理内存归还给操作系统的机制。长期运行后，进程的 RSS (Resident Set Size) 会持续处于高位。
 
@@ -31,9 +37,9 @@
 - **与 PageCache 交互**:
   - `Scavenge()` 需要持有 `PageCache::mutex_` 进行扫描。
   - 采用 **"Extract-Release-Return"** 策略以最小化持锁时间。
-- 配置项：
-  - `kScavengeIntervalMs` (清理间隔，默认 500ms) 。
-  -  `kIdleThresholdMs` (闲置阈值，默认 5000ms)。
+- 配置项（以代码事实为准，[page_heap_scavenger.h:51-53](../../include/ammalloc/page_heap_scavenger.h)）：
+  - `kScavengeIntervalMs` (清理间隔，默认 1000ms) 。
+  -  `kIdleThresholdMs` (闲置阈值，默认 10000ms)。
 
 ### 3.2 `Span` 结构体扩展
 ```cpp

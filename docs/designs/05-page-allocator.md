@@ -2,6 +2,11 @@
 
 > ammalloc 内存分配器的页级 OS 分配层设计
 
+- **状态**: Current（描述已验证实现）
+- **关联代码**: [include/ammalloc/page_allocator.h](../../include/ammalloc/page_allocator.h)、[src/page_allocator.cpp](../../src/page_allocator.cpp)
+- **关联测试**: [tests/unit/test_page_allocator.cpp](../../tests/unit/test_page_allocator.cpp)
+- **架构总览**: [ammalloc_design.md §5.7](ammalloc_design.md)
+
 ---
 
 ## 1. 设计目标与背景

@@ -2,6 +2,11 @@
 
 > ammalloc 后端页缓存（PageCache + PageMap）设计与并发优化方案
 
+- **状态**: Current（描述已验证实现）
+- **关联代码**: [include/ammalloc/page_cache.h](../../include/ammalloc/page_cache.h)、[src/page_cache.cpp](../../src/page_cache.cpp)
+- **关联测试**: [tests/unit/test_page_cache.cpp](../../tests/unit/test_page_cache.cpp)
+- **架构总览**: [ammalloc_design.md §5.3/§5.6](ammalloc_design.md)
+
 ---
 
 ## 1. 目标与范围

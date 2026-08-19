@@ -1,5 +1,6 @@
 # 业界内存分配器后台线程启动策略调研报告
 
+> **文档定位**: 调研备忘（非规范，不承诺实现；结论供设计参考，已被 [ADR-0001](../../decisions/0001-scavenger-startup-strategy.md) 部分采纳）
 > **调研目标**: 为 AetherMind ammalloc 的 PageHeapScavenger 启动时机设计提供业界最佳实践参考
 > **调研对象**: Google TCMalloc、Facebook jemalloc、Microsoft snmalloc
 > **调研时间**: 2026-03-05

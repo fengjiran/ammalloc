@@ -1,12 +1,12 @@
 # ammalloc 设计文档
 
-**版本**: v2.0
+**版本**: v2.0.2
 **日期**: 2026-08-19
 **作者**: AetherMind Team
 
 > **文档定位**：本文档描述 **当前已验证实现**（current state）的架构与设计。所有内容均对照 `include/ammalloc/`、`src/` 中的代码事实编写；当本文档与代码冲突时，以经过测试验证的仓库事实为准。
 >
-> **未来架构**（per-CPU、NUMA、标准 ABI 替换、BootstrapAllocator 等）属于演进方向，见第 12 章及 [`docs/designs/ammalloc_improvement_plan/`](ammalloc_improvement_plan/README.md)。
+> **未来架构**（per-CPU、NUMA、标准 ABI 替换、BootstrapAllocator 等）属于演进方向，见第 12 章及 [`docs/improvement-plan/`](../improvement-plan/README.md)。
 
 ---
 
@@ -531,6 +531,8 @@ while (true) {
 
 ### 5.4 SizeClass（尺寸分级）
 
+> 详细设计与验证（算法推演、编译期校验清单、测试矩阵）见 [01-size-class.md](01-size-class.md)。
+
 #### 5.4.1 分级策略
 
 混合映射：**线性区 + 几何步进区**，全部推导基于 `ALIGNMENT = alignof(std::max_align_t) = 16`：
@@ -574,13 +576,13 @@ else {
 
 | 区间 | 步长 | 最坏内部碎片 |
 |------|------|--------------|
-| [1, 128]（线性，16B 档） | 16 B | 93.75%（1B 请求→16B）；均匀分布平均约 12% |
+| [1, 128]（线性，16B 档） | 16 B | 93.75%（1B 请求→16B）；[1,128] 均匀分布累计 ≈ 10.4% |
 | (128, 256]（几何组 0） | 32 B | ≈ 25% |
 | (256, 512]（几何组 1） | 64 B | ≈ 25% |
 | ... | 每档 = 区间上限的 1/4 | ≈ 25% |
 | (16KiB, 32KiB] | 4 KiB | ≈ 25% |
 
-几何区平均碎片 ≈ 12.5%，符合 TCMalloc 设计目标；同时所有 class size 均为 `ALIGNMENT` 的倍数，保证每个对象 16B 对齐。
+几何区平均碎片 ≈ 12.5%（阶梯映射采用 jemalloc 风格，4 档/组，见 `01-size-class.md` §2.4）；同时所有 class size 均为 `ALIGNMENT` 的倍数，保证每个对象 16B 对齐。
 
 #### 5.4.5 对齐保证
 
@@ -966,7 +968,7 @@ struct PageConfig {
 
 ## 12. 演进方向
 
-本文档描述的是**当前已验证实现**。`docs/designs/ammalloc_improvement_plan/`（18 个专题 + 路线图）定义了将 ammalloc 建设为可安全接管进程内存、对标 TCMalloc/jemalloc 的工业级分配器的目标架构与分阶段路线，要点如下：
+本文档描述的是**当前已验证实现**。`docs/improvement-plan/`（18 个专题 + 路线图）定义了将 ammalloc 建设为可安全接管进程内存、对标 TCMalloc/jemalloc 的工业级分配器的目标架构与分阶段路线，要点如下：
 
 | 阶段 | 主题 | 代表性工作 |
 |------|------|-----------|
@@ -978,7 +980,7 @@ struct PageConfig {
 | Phase 6 | aethermind 内存基础设施 | versioned arena、KV/request arena、压力优先级、模型级采样 |
 | Phase 7 | 安全与生产成熟 | ReleaseChecked、pointer encoding、guarded sampling、quarantine、ABI 稳定、SLO |
 
-关键原则：正确性与生命周期安全先于极限性能；后续阶段不得绕过前置门禁；高阶优化（per-CPU、NUMA、HugepageFiller、epoch 回收）在基础正确性建立前只做隔离研究。详见 [`ammalloc_improvement_plan/README.md`](ammalloc_improvement_plan/README.md)。
+关键原则：正确性与生命周期安全先于极限性能；后续阶段不得绕过前置门禁；高阶优化（per-CPU、NUMA、HugepageFiller、epoch 回收）在基础正确性建立前只做隔离研究。详见 [`improvement-plan/README.md`](../improvement-plan/README.md)。
 
 ---
 
@@ -996,6 +998,7 @@ ammalloc/
 │   ├── attributes.h             # 编译器属性与 builtin 包装宏
 │   ├── common.h                 # 地址/对齐/CPU/配置解析工具 + ObjectPool
 │   ├── config.h                 # 编译期与运行期配置
+│   ├── free_list.h              # 嵌入式 LIFO 空闲链表（FreeBlock/FreeList）
 │   ├── thread_cache.h           # TLS 前端缓存
 │   ├── central_cache.h          # 全局中端缓存
 │   ├── page_cache.h             # 分片页缓存 + PageMap 基数树
@@ -1018,18 +1021,29 @@ ammalloc/
 │   ├── unit/                    # GoogleTest 单元测试（单可执行）
 │   └── benchmark/               # Google Benchmark（单可执行）
 └── docs/
-    ├── designs/                 # 架构与子系统设计文档
-    └── guides/                  # 编码/注释/测试规范
+    ├── README.md                # 文档索引与术语表
+    ├── issues.md                # 问题与待办跟踪
+    ├── designs/                 # 架构与模块设计（NN- 编号）
+    │   └── research/            # 调研备忘
+    ├── improvement-plan/        # 演进提案（18 个专题 + README）
+    ├── guides/                  # 编码/注释/测试/文档规范
+    ├── api/                     # 公共 API 参考
+    ├── decisions/               # 架构决策记录（ADR）
+    └── templates/               # 文档模板
 ```
 
 ### B. 相关设计文档与参考资料
 
-- 本仓库子系统设计（与当前实现同步维护）：
-  - `docs/designs/size_class_design.md`
-  - `docs/designs/page_cache_design.md`
-  - `docs/designs/page_allocator_design.md`
-  - `docs/designs/page_heap_scavenger_design.md`
-- 演进规划：`docs/designs/ammalloc_improvement_plan/`（18 个专题文档 + README）
+- 本仓库子系统设计（与当前实现同步维护，完整索引见 [docs/README.md](../README.md)）：
+  - `docs/designs/01-size-class.md`
+  - `docs/designs/02-thread-cache.md`
+  - `docs/designs/03-central-cache.md`
+  - `docs/designs/04-page-cache.md`
+  - `docs/designs/05-page-allocator.md`
+  - `docs/designs/06-page-heap-scavenger.md`
+  - `docs/designs/07-span-and-pagemap.md`
+- 演进规划：`docs/improvement-plan/`（18 个专题文档 + README）
+- 文档系统规范：`docs/guides/documentation-guide.md`；公共 API 参考：`docs/api/public-api.md`；架构决策记录：`docs/decisions/`
 - 外部参考：
   1. **TCMalloc**: Google's Thread-Caching Malloc — https://github.com/google/tcmalloc
   2. **jemalloc**: A General Purpose malloc Implementation — https://github.com/jemalloc/jemalloc
@@ -1044,3 +1058,5 @@ ammalloc/
 |------|------|------|----------|
 | v1.0 | 2026-02-26 | AetherMind Team | 初始版本 |
 | v2.0 | 2026-08-19 | AetherMind Team | 全量对齐当前实现：分片 PageCache、四层 PageMap（48/57-bit）、Span 64B 布局、ObjectPool、PageAllocator 2MiB 缓存、PageHeapScavenger；更新 SizeClass 映射/碎片率/对齐契约、配置参数、性能基线；清理重复图表；新增"演进方向"章链接改进计划 |
+| v2.0.1 | 2026-08-19 | AetherMind Team | §5.4 对齐 `01-size-class.md` v2.3：阶梯映射设计依据修正为 jemalloc 风格；线性区 [1,128] 均匀分布累计碎片修正为 ≈10.4%；增加指向子文档的链接 |
+| v2.0.2 | 2026-08-19 | AetherMind Team | `FreeList`/`FreeBlock` 从 central_cache.h 迁出至独立头文件 `free_list.h`（上层头文件不再依赖中端头文件）；附录 A 文件结构同步 |
