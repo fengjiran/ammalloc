@@ -12,6 +12,34 @@
 
 namespace ammalloc {
 
+namespace quota_policy {
+
+size_t NextAfterRefill(size_t current, size_t batch) noexcept {
+    if (current < batch) {
+        // Exponential warmup until one batch.
+        return std::min(batch, current + std::max<size_t>(1, current));
+    }
+    if (current < batch * 8) {
+        // Linear growth above one batch, bounded at 8 batches.
+        return std::min(batch * 8, current + std::max<size_t>(1, batch / 8));
+    }
+    return current;
+}
+
+QuotaState NextAfterOverflow(size_t current, size_t batch, size_t overages) noexcept {
+    if (current <= batch) {
+        // At the floor: no decay state needed.
+        return {current, 0};
+    }
+    if (overages + 1 >= kMaxOverages) {
+        // Enough consecutive overflows: decay by one batch, floor at one batch.
+        return {std::max(current - batch, batch), 0};
+    }
+    return {current, overages + 1};
+}
+
+}// namespace quota_policy
+
 void ThreadCache::ReleaseAll() {
     for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
         auto& list = free_lists_[i];
@@ -20,17 +48,11 @@ void ThreadCache::ReleaseAll() {
         }
 
         const auto size = SizeClass::Size(i);
-        void* start = nullptr;
-        const auto cnt = list.size();
-        for (size_t j = 0; j < cnt; ++j) {
-            void* ptr = list.pop();
-            static_cast<FreeBlock*>(ptr)->next = static_cast<FreeBlock*>(start);
-            start = ptr;
-        }
+        const auto chain = list.pop_range(list.size());
 
         // Drain the entire per-class cache during teardown so ownership returns
         // to CentralCache/PageCache before the TLS object disappears.
-        CentralCache::GetInstance().ReleaseListToSpans(start, size);
+        CentralCache::GetInstance().ReleaseListToSpans(chain.head, size);
         list.set_max_size(1);
         list.set_overages(0);
     }
@@ -47,54 +69,28 @@ void* ThreadCache::FetchFromCentralCache(FreeList& list, size_t aligned_size) no
         return nullptr;// Out of memory
     }
 
-    // Two-stage growth policy:
-    // - below one batch: exponential warmup reduces refill churn quickly,
-    // - above one batch: linear growth keeps the high-water mark bounded.
-    if (list.max_size() < batch_num) {
-        const auto inc = std::max<size_t>(1, list.max_size());
-        list.set_max_size(std::min(batch_num, list.max_size() + inc));
-    } else if (list.max_size() < batch_num * 8) {
-        size_t inc = std::max<size_t>(1, batch_num / 8);
-        list.set_max_size(std::min(batch_num * 8, list.max_size() + inc));
-    }
-
     // Fresh allocation demand cancels any prior decay trend for this class.
+    list.set_max_size(quota_policy::NextAfterRefill(list.max_size(), batch_num));
     list.set_overages(0);
     return list.pop();
 }
 
 void ThreadCache::DeallocateSlowPath(FreeList& list, size_t aligned_size) noexcept {
     const auto batch_num = SizeClass::CalculateBatchSize(aligned_size);
-    void* start = nullptr;
 
     // Return at most one batch per overflow event. This bounds slow-path work
     // and avoids draining the local cache completely on every trim.
-    for (size_t i = 0; i < batch_num && !list.empty(); ++i) {
-        void* ptr = list.pop();
-        static_cast<FreeBlock*>(ptr)->next = static_cast<FreeBlock*>(start);
-        start = ptr;
+    const auto chain = list.pop_range(batch_num);
+    if (chain.head) {
+        CentralCache::GetInstance().ReleaseListToSpans(chain.head, aligned_size);
     }
 
-    if (start) {
-        CentralCache::GetInstance().ReleaseListToSpans(start, aligned_size);
-    }
-
-    // Repeated overflow without intervening refill demand indicates that the
-    // current high-water mark is larger than the thread's steady-state need.
-    // After a few such events, decay the quota by one batch and reset the
-    // counter. This keeps burst-era cache size from sticking forever.
-    constexpr size_t kMaxOverages = 3;
-    if (list.max_size() > batch_num) {
-        list.set_overages(list.overages() + 1);
-        if (list.overages() >= kMaxOverages) {
-            list.set_max_size(std::max(list.max_size() - batch_num, batch_num));
-            list.set_overages(0);
-        }
-    } else {
-        // Once the quota is back at its batch-sized floor, no additional decay
-        // state is needed.
-        list.set_overages(0);
-    }
+    // Repeated overflow without intervening refill demand decays the quota
+    // (see quota_policy::NextAfterOverflow), so burst-era caches do not stick.
+    const auto next =
+            quota_policy::NextAfterOverflow(list.max_size(), batch_num, list.overages());
+    list.set_max_size(next.max_size);
+    list.set_overages(next.overages);
 }
 
 }// namespace ammalloc

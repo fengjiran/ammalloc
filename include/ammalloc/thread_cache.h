@@ -15,6 +15,34 @@
 
 namespace ammalloc {
 
+/// @brief Pure quota-adjustment rules for ThreadCache size-class caches.
+/// State (max_size/overages) lives in FreeList; these helpers compute the next
+/// values only, so the policy can be unit-tested without CentralCache I/O.
+namespace quota_policy {
+
+/// @brief Consecutive overflow trims that trigger quota decay.
+inline constexpr size_t kMaxOverages = 3;
+
+/// @brief Next quota after a successful central refill.
+/// Two-stage growth: exponential warmup below one batch, then linear growth up
+/// to 8 batches. Returns the unchanged quota at the ceiling.
+AM_NODISCARD size_t NextAfterRefill(size_t current, size_t batch) noexcept;
+
+/// @brief Quota and overage counter after one overflow trim.
+struct QuotaState {
+    size_t max_size;
+    size_t overages;
+};
+
+/// @brief Next quota state after a slow-path overflow release.
+/// Repeated overflow without intervening refill decays the quota by one batch
+/// (floor: one batch) and resets the counter; otherwise the counter advances.
+/// At the floor, no decay state is retained.
+AM_NODISCARD QuotaState NextAfterOverflow(size_t current, size_t batch,
+                                          size_t overages) noexcept;
+
+}// namespace quota_policy
+
 /// @brief Caches thread-cacheable objects for one owning thread.
 ///
 /// ThreadCache provides the allocator's lowest-latency path: a TLS-owned array
