@@ -8,7 +8,8 @@
 #include <limits>
 #include <random>
 
-namespace ammalloc {
+namespace {
+using namespace ammalloc;
 
 class PageCacheTest : public ::testing::Test {
 protected:
@@ -44,11 +45,6 @@ protected:
         return first;
     }
 };
-
-}// namespace ammalloc
-
-namespace {
-using namespace ammalloc;
 
 // 测试点 1: 超大内存分配 (> 128页)
 // 预期：不经过桶，直接向 PageAllocator 申请，释放时直接还给系统

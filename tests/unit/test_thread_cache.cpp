@@ -10,7 +10,8 @@
 #include <thread>
 #include <vector>
 
-namespace ammalloc {
+namespace {
+using namespace ammalloc;
 
 class ThreadCacheTest : public ::testing::Test {
 protected:
@@ -27,11 +28,6 @@ protected:
         page_cache_.Reset();
     }
 };
-
-}// namespace ammalloc
-
-namespace {
-using namespace ammalloc;
 
 // 测试点 1: 基本的 Allocate 操作
 TEST_F(ThreadCacheTest, BasicAllocate) {
