@@ -366,7 +366,7 @@ TEST_F(CentralCacheTest, FreeListPushRange) {
     node2->next = tail;
     tail->next = nullptr;
 
-    list.push_range(head, tail, 3);
+    list.push_range(FreeChain{head, tail, 3});
 
     EXPECT_EQ(list.size(), 3);
     EXPECT_EQ(list.pop(), head);

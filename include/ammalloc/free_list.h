@@ -5,16 +5,31 @@
 /// @brief Allocation-free intrusive LIFO object chain with per-class quota state.
 /// @see docs/designs/02-thread-cache.md
 
+#include "ammalloc/assert.h"
 #include "ammalloc/attributes.h"
+#include "ammalloc/config.h"
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 namespace ammalloc {
 
 /// @brief Intrusive link stored in the body of a free object.
 struct FreeBlock {
     FreeBlock* next;
+};
+
+// The intrusive link must fit inside the smallest object slot; the size
+// classes guarantee the minimum object is ALIGNMENT bytes (see size_class.h).
+static_assert(sizeof(FreeBlock) <= SystemConfig::ALIGNMENT,
+              "intrusive next pointer does not fit in the smallest object");
+
+/// @brief A detached chain of free objects removed from a FreeList.
+struct FreeChain {
+    void* head = nullptr;
+    void* tail = nullptr;
+    size_t count = 0;
 };
 
 /// @brief Stores free objects in an allocation-free intrusive LIFO chain.
@@ -47,17 +62,15 @@ public:
         return size_;
     }
 
-    /// @brief Removes all objects without modifying their embedded links.
-    void clear() noexcept {
-        head_ = nullptr;
-        size_ = 0;
-    }
-
     /// @brief Pushes one object onto the front of the list.
     /// @param ptr Object whose first pointer-sized bytes may store an intrusive link;
     ///        null is ignored.
     void push(void* ptr) noexcept {
-        if (!ptr) AM_UNLIKELY return;
+        // clang-format off
+        if (!ptr) AM_UNLIKELY {
+            return;
+        }
+        // clang-format on
 
         auto* block = static_cast<FreeBlock*>(ptr);
         block->next = head_;
@@ -65,31 +78,74 @@ public:
         ++size_;
     }
 
-    /// @brief Prepends an existing intrusive chain to the list.
-    /// @param begin First object in the chain.
-    /// @param end Last object in the chain.
-    /// @param count Number of objects in the chain.
-    /// @pre A non-empty chain is well formed and `end` is reachable from `begin`.
-    void push_range(void* begin, void* end, size_t count) noexcept {
-        if (!begin || !end || count == 0) {
+    /// @brief Prepends an existing chain to the list.
+    /// @param chain Detached chain (head/tail/count); the head/tail pair must be
+    ///        a well-formed chain of `count` objects.
+    void push_range(const FreeChain& chain) noexcept {
+        if (!chain.head || !chain.tail || chain.count == 0) {
             return;
         }
 
-        static_cast<FreeBlock*>(end)->next = head_;
-        head_ = static_cast<FreeBlock*>(begin);
-        size_ += count;
+        // Debug-only invariant: `count` must match the chain length and `tail`
+        // must be the chain's last node. A mismatch would desync size_ from head_.
+        AM_DCHECK(CountChain(static_cast<FreeBlock*>(chain.head),
+                             static_cast<FreeBlock*>(chain.tail)) == chain.count);
+
+        static_cast<FreeBlock*>(chain.tail)->next = head_;
+        head_ = static_cast<FreeBlock*>(chain.head);
+        size_ += chain.count;
+    }
+
+    /// @brief Removes up to `n` objects from the front, preserving chain order.
+    /// @param n Maximum number of objects to remove.
+    /// @return The detached chain (head/tail/count); count is smaller than `n`
+    ///         only when the list holds fewer than `n` objects. The returned
+    ///         chain is terminated: `tail->next == nullptr`.
+    AM_NODISCARD FreeChain pop_range(size_t n) noexcept {
+        FreeChain out;
+        FreeBlock* cur = head_;
+        for (size_t i = 0; i < n && cur; ++i) {
+            out.tail = cur;
+            cur = cur->next;
+            ++out.count;
+        }
+
+        if (out.count > 0) {
+            out.head = head_;
+            head_ = cur;
+            AM_DCHECK(out.count <= size_);
+            size_ -= out.count;
+            // Terminate the detached chain so walkers cannot reach the
+            // objects that remain in this list.
+            static_cast<FreeBlock*>(out.tail)->next = nullptr;
+            // Invariant: head_ is null exactly when size_ is zero.
+            AM_DCHECK((head_ == nullptr) == (size_ == 0));
+        }
+        return out;
     }
 
     /// @brief Removes the most recently pushed object.
     /// @return Removed object, or null when the list is empty.
     AM_NODISCARD void* pop() noexcept {
-        if (empty()) AM_UNLIKELY return nullptr;
+        // clang-format off
+        if (empty()) AM_UNLIKELY {
+            return nullptr;
+        }
 
         auto* block = head_;
-        if (block->next) AM_LIKELY AM_BUILTIN_PREFETCH(block->next, 0, 3);
+        if (block->next) AM_LIKELY {
+            AM_BUILTIN_PREFETCH(block->next, 0, 3);
+        }
+        // clang-format on
+
+        // Debug-only invariants: catch a head_/size_ desync before it
+        // propagates as a wrapped counter or a stale size residue.
+        AM_DCHECK(size_ > 0);
 
         head_ = head_->next;
         --size_;
+        // Invariant: head_ is null exactly when size_ is zero.
+        AM_DCHECK((head_ == nullptr) == (size_ == 0));
         return block;
     }
 
@@ -100,9 +156,12 @@ public:
     }
 
     /// @brief Replaces the ThreadCache high-water limit.
-    /// @param n New object-count limit.
+    /// @param n New object-count limit; clamped to at least 1 because a zero
+    ///        quota would make every refill fail permanently.
     void set_max_size(size_t n) noexcept {
-        max_size_ = n;
+        // Debug-only: flag callers that pass zero instead of silently clamping.
+        AM_DCHECK(n >= 1);
+        max_size_ = std::max(n, size_t{1});
     }
 
     /// @brief Returns the consecutive overflow-trim count.
@@ -118,24 +177,34 @@ public:
     }
 
 private:
+    // Debug helper: walks the chain from `head` to `end`; returns SIZE_MAX
+    // when `end` is unreachable.
+    static size_t CountChain(const FreeBlock* head, const FreeBlock* end) noexcept {
+        size_t n = 0;
+        while (head && head != end) {
+            head = head->next;
+            ++n;
+        }
+        return head ? n + 1 : std::numeric_limits<size_t>::max();
+    }
+
     // Head of the intrusive LIFO chain.
     FreeBlock* head_;
 
     // Number of cached objects currently held in this list.
-    uint32_t size_;
+    size_t size_;
 
     // ThreadCache high-water mark for this size class.
     //
     // This starts at 1, grows under refill pressure, and decays in batch-sized
-    // steps after repeated overflow trims. CentralCache-owned temporary lists do
-    // not interpret this field as a policy knob.
-    uint32_t max_size_;
+    // steps after repeated overflow trims.
+    size_t max_size_;
 
     // Counts consecutive overflow-trim events without intervening refill demand.
     //
     // ThreadCache uses this as a cheap decay signal: sustained free pressure
     // means the current high-water mark is likely above steady-state demand.
-    uint32_t overages_;
+    size_t overages_;
 };
 
 }// namespace ammalloc
