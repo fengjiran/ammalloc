@@ -3,7 +3,7 @@
 
 /// @file
 /// @brief Allocation-free intrusive LIFO object chain with per-class quota state.
-/// @see docs/designs/02-thread-cache.md
+/// @see docs/designs/08-free-list.md
 
 #include "ammalloc/assert.h"
 #include "ammalloc/attributes.h"

@@ -262,9 +262,9 @@ void  am_free(void* ptr);
 ```cpp
 class FreeList {
     FreeBlock* head_;    // 嵌入式链表头
-    uint32_t  size_;     // 当前对象数
-    uint32_t  max_size_; // 水位线（慢启动增长 / 超配衰减）
-    uint32_t  overages_; // 连续溢出裁剪计数（衰减信号）
+    size_t    size_;     // 当前对象数
+    size_t    max_size_; // 水位线（慢启动增长 / 超配衰减）
+    size_t    overages_; // 连续溢出裁剪计数（衰减信号）
 };
 
 struct FreeBlock {

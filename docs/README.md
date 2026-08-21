@@ -32,6 +32,7 @@
 | [05-page-allocator.md](designs/05-page-allocator.md) | OS 交互层：mmap/munmap/madvise、映射缓存 | Current | 2026-08-19 |
 | [06-page-heap-scavenger.md](designs/06-page-heap-scavenger.md) | 后台回收线程：MADV_DONTNEED 与 RSS 治理 | Current | 2026-08-19 |
 | [07-span-and-pagemap.md](designs/07-span-and-pagemap.md) | Span 元数据生命周期与 PageMap 基数树 | Current | 2026-08-19 |
+| [08-free-list.md](designs/08-free-list.md) | 嵌入式 LIFO 空闲链表：单/批量流转与每类配额 | Current | 2026-08-21 |
 | [research/allocator-background-thread.md](designs/research/allocator-background-thread.md) | 调研备忘：业界后台线程启动策略 | 调研 | 2026-03-05 |
 | [research/thread-local-and-thread-cache.md](designs/research/thread-local-and-thread-cache.md) | 调研备忘：thread_local 在 ThreadCache 的语义、收益与成本 | 调研 | 2026-08-19 |
 
