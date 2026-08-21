@@ -156,6 +156,7 @@ namespace ammalloc {
 
 #ifdef AMMALLOC_TEST
 std::atomic<bool> g_mock_huge_alloc_fail{false};
+std::atomic<bool> g_mock_normal_alloc_fail{false};
 #endif
 
 #ifndef MAP_POPULATE
@@ -268,6 +269,12 @@ void* PageAllocator::AllocNormalPage(size_t size) {
     AM_DCHECK((size & (SystemConfig::PAGE_SIZE - 1)) == 0);
 
     stats_.normal_alloc_count.fetch_add(1, std::memory_order_relaxed);
+#ifdef AMMALLOC_TEST
+    if (g_mock_normal_alloc_fail.load(std::memory_order_relaxed)) {
+        stats_.normal_alloc_failed_count.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+#endif
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
     if (RuntimeConfig::GetInstance().UseMapPopulate()) {
         flags |= MAP_POPULATE;

@@ -19,11 +19,13 @@ namespace ammalloc {
 
 #ifdef AMMALLOC_TEST
 extern std::atomic<bool> g_mock_huge_alloc_fail;
+extern std::atomic<bool> g_mock_normal_alloc_fail;
 #define PAGEALLOCATOR_FRIEND_TEST   \
     friend class PageAllocatorTest; \
     friend class PageAllocatorThreadSafeTest
 #else
 #define g_mock_huge_alloc_fail (false)
+#define g_mock_normal_alloc_fail (false)
 #define PAGEALLOCATOR_FRIEND_TEST
 #endif
 

@@ -20,6 +20,7 @@ public:
         PageAllocator::ResetStats();
         PageAllocator::ReleaseHugePageCache();
         g_mock_huge_alloc_fail.store(false, std::memory_order_relaxed);
+        g_mock_normal_alloc_fail.store(false, std::memory_order_relaxed);
     }
 
     void TearDown() override {
