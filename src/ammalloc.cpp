@@ -5,6 +5,7 @@
 #include "ammalloc/page_cache.h"
 #include "ammalloc/page_heap_scavenger.h"
 #include "ammalloc/thread_cache.h"
+
 #include <atomic>
 #include <spdlog/spdlog.h>
 
@@ -23,8 +24,9 @@ ThreadCache* CreateThreadCache() {
         return nullptr;
     }
 
-    static std::mutex tc_init_mtx;
-    std::lock_guard<std::mutex> lock(tc_init_mtx);
+    // All guarded state is thread-local and SystemAlloc is thread-safe, so no
+    // cross-thread serialization is needed here; a global mutex would only add
+    // a startup contention point.
     if (pTLSThreadCache) {
         return pTLSThreadCache;
     }
@@ -32,6 +34,9 @@ ThreadCache* CreateThreadCache() {
     constexpr auto tc_size = sizeof(ThreadCache);
     constexpr auto page_num = (tc_size + SystemConfig::PAGE_SIZE - 1) >> SystemConfig::PAGE_SHIFT;
     void* ptr = PageAllocator::SystemAlloc(page_num);
+    if (!ptr) {
+        return nullptr;
+    }
     return new (ptr) ThreadCache;
 }
 
