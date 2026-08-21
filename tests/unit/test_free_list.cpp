@@ -184,4 +184,105 @@ TEST(FreeListTest, PushRangeEndUnreachableDeath) {
 #endif
 }
 
+// pop_range_tail evicts the least recently pushed objects, keeping the newest
+// ones local (overflow-trim locality contract).
+TEST(FreeListTest, PopRangeTailKeepsNewest) {
+    std::array<FreeBlock, 5> blocks{};
+    for (size_t i = 0; i < 4; ++i) {
+        blocks[i].next = &blocks[i + 1];
+    }
+    blocks[4].next = nullptr;
+
+    FreeList list;
+    // LIFO: blocks[0] is the newest, blocks[4] the oldest.
+    list.push_range(FreeChain{blocks.data(), &blocks[4], 5});
+
+    const FreeChain chain = list.pop_range_tail(2);
+
+    // The two oldest objects are evicted, the three newest stay.
+    EXPECT_EQ(chain.count, 2);
+    EXPECT_EQ(chain.head, &blocks[3]);
+    EXPECT_EQ(chain.tail, &blocks[4]);
+    EXPECT_EQ(list.size(), 3);
+    // Both chains are terminated at the cut point.
+    EXPECT_EQ(blocks[2].next, nullptr);
+    EXPECT_EQ(blocks[4].next, nullptr);
+
+    // The remaining chain keeps LIFO order.
+    EXPECT_EQ(list.pop(), blocks.data());
+    EXPECT_EQ(list.pop(), &blocks[1]);
+    EXPECT_EQ(list.pop(), &blocks[2]);
+    EXPECT_TRUE(list.empty());
+}
+
+// pop_range_tail evicts everything when n covers the whole list.
+TEST(FreeListTest, PopRangeTailAllWhenLongEnough) {
+    std::array<FreeBlock, 3> blocks{};
+    blocks[0].next = &blocks[1];
+    blocks[1].next = &blocks[2];
+    blocks[2].next = nullptr;
+
+    FreeList list;
+    list.push_range(FreeChain{blocks.data(), &blocks[2], 3});
+
+    const FreeChain chain = list.pop_range_tail(5);
+
+    EXPECT_EQ(chain.count, 3);
+    EXPECT_EQ(chain.head, blocks.data());
+    EXPECT_EQ(chain.tail, &blocks[2]);
+    EXPECT_TRUE(list.empty());
+    EXPECT_EQ(list.size(), 0);
+}
+
+// pop_range_tail on an empty list returns an empty chain.
+TEST(FreeListTest, PopRangeTailOnEmptyList) {
+    FreeList list;
+
+    const FreeChain chain = list.pop_range_tail(3);
+
+    EXPECT_EQ(chain.count, 0);
+    EXPECT_EQ(chain.head, nullptr);
+    EXPECT_EQ(chain.tail, nullptr);
+    EXPECT_TRUE(list.empty());
+}
+
+// pop_range_tail with n == 0 is a no-op.
+TEST(FreeListTest, PopRangeTailZeroCount) {
+    std::array<FreeBlock, 2> blocks{};
+    blocks[0].next = &blocks[1];
+    blocks[1].next = nullptr;
+
+    FreeList list;
+    list.push_range(FreeChain{blocks.data(), &blocks[1], 2});
+
+    const FreeChain chain = list.pop_range_tail(0);
+
+    EXPECT_EQ(chain.count, 0);
+    EXPECT_EQ(list.size(), 2);
+    EXPECT_EQ(list.pop(), blocks.data());
+}
+
+// pop_range_tail output round-trips through push_range.
+TEST(FreeListTest, PopRangeTailPushRangeRoundTrip) {
+    std::array<FreeBlock, 4> blocks{};
+    for (size_t i = 0; i < 3; ++i) {
+        blocks[i].next = &blocks[i + 1];
+    }
+    blocks[3].next = nullptr;
+
+    FreeList list;
+    list.push_range(FreeChain{blocks.data(), &blocks[3], 4});
+
+    const FreeChain chain = list.pop_range_tail(1);
+    list.push_range(chain);
+
+    EXPECT_EQ(list.size(), 4);
+    // The evicted oldest object (blocks[3]) is re-prepended, becoming newest.
+    EXPECT_EQ(list.pop(), &blocks[3]);
+    EXPECT_EQ(list.pop(), blocks.data());
+    EXPECT_EQ(list.pop(), &blocks[1]);
+    EXPECT_EQ(list.pop(), &blocks[2]);
+    EXPECT_TRUE(list.empty());
+}
+
 }// namespace

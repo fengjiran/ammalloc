@@ -65,7 +65,7 @@ public:
     /// @brief Pushes one object onto the front of the list.
     /// @param ptr Object whose first pointer-sized bytes may store an intrusive link;
     ///        null is ignored.
-    void push(void* ptr) noexcept {
+    AM_ALWAYS_INLINE void push(void* ptr) noexcept {
         // clang-format off
         if (!ptr) AM_UNLIKELY {
             return;
@@ -124,9 +124,52 @@ public:
         return out;
     }
 
+    /// @brief Removes up to `n` objects from the back of the list, keeping the
+    ///        front (most recently pushed) objects local for reuse.
+    /// @param n Maximum number of objects to remove.
+    /// @return The detached chain (head/tail/count); the head is the newest
+    ///         removed object and the tail the oldest. O(list size) traversal,
+    ///         intended for slow paths only.
+    AM_NODISCARD FreeChain pop_range_tail(size_t n) noexcept {
+        FreeChain out;
+        const size_t pop_count = n < size_ ? n : size_;
+        if (pop_count == 0) {
+            return out;
+        }
+
+        // Nodes [0, keep) stay in the list; nodes [keep, size_) are evicted.
+        // Walk to the last retained node (index keep - 1).
+        const size_t keep = size_ - pop_count;
+        FreeBlock* keep_tail = head_;
+        for (size_t i = 0; i + 1 < keep; ++i) {
+            keep_tail = keep_tail->next;
+        }
+
+        if (keep == 0) {
+            // The whole list is evicted.
+            out.head = head_;
+            head_ = nullptr;
+        } else {
+            out.head = keep_tail->next;
+            keep_tail->next = nullptr;
+        }
+
+        // Walk to the end of the detached chain; it is a suffix of the list.
+        auto* tail = static_cast<FreeBlock*>(out.head);
+        while (tail->next) {
+            tail = tail->next;
+        }
+        out.tail = tail;
+        out.count = pop_count;
+        size_ = keep;
+        // Invariant: head_ is null exactly when size_ is zero.
+        AM_DCHECK((head_ == nullptr) == (size_ == 0));
+        return out;
+    }
+
     /// @brief Removes the most recently pushed object.
     /// @return Removed object, or null when the list is empty.
-    AM_NODISCARD void* pop() noexcept {
+    AM_NODISCARD AM_ALWAYS_INLINE void* pop() noexcept {
         // clang-format off
         if (empty()) AM_UNLIKELY {
             return nullptr;

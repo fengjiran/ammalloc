@@ -78,9 +78,10 @@ void* ThreadCache::FetchFromCentralCache(FreeList& list, size_t aligned_size) no
 void ThreadCache::DeallocateSlowPath(FreeList& list, size_t aligned_size) noexcept {
     const auto batch_num = SizeClass::CalculateBatchSize(aligned_size);
 
-    // Return at most one batch per overflow event. This bounds slow-path work
-    // and avoids draining the local cache completely on every trim.
-    const auto chain = list.pop_range(batch_num);
+    // Return at most one batch per overflow event, evicting the oldest objects
+    // first so recently freed ones stay local for reuse. This bounds slow-path
+    // work and avoids draining the local cache completely on every trim.
+    const auto chain = list.pop_range_tail(batch_num);
     if (chain.head) {
         CentralCache::GetInstance().ReleaseListToSpans(chain.head, aligned_size);
     }

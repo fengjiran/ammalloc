@@ -102,7 +102,7 @@ public:
     /// @pre `idx < SizeClass::kNumSizeClasses`
     /// @note The fast path is a single FreeList push. Slow path is entered only
     ///       when local occupancy reaches the current per-class limit.
-    void AM_ALWAYS_INLINE Deallocate(void* ptr, size_t idx) {
+    AM_ALWAYS_INLINE void Deallocate(void* ptr, size_t idx) {
         AM_DCHECK(ptr != nullptr);
         AM_DCHECK(idx < SizeClass::kNumSizeClasses);
 
