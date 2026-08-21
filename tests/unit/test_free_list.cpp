@@ -6,7 +6,7 @@ namespace {
 
 using namespace ammalloc;
 
-// 测试点 1: push(nullptr) 必须被忽略，链表状态保持不变
+// Test point 1: push(nullptr) must be ignored, list state unchanged
 TEST(FreeListTest, PushNullIsIgnored) {
     FreeList list;
 
@@ -16,7 +16,7 @@ TEST(FreeListTest, PushNullIsIgnored) {
     EXPECT_EQ(list.size(), 0);
 }
 
-// 测试点 2: 空表 pop() 返回 nullptr，状态保持不变
+// Test point 2: pop() on empty list returns nullptr, state unchanged
 TEST(FreeListTest, PopOnEmptyReturnsNull) {
     FreeList list;
 
@@ -25,7 +25,7 @@ TEST(FreeListTest, PopOnEmptyReturnsNull) {
     EXPECT_EQ(list.size(), 0);
 }
 
-// 测试点 3: push_range 收到空指针链时拒绝入链
+// Test point 3: push_range rejects null-pointer chains
 TEST(FreeListTest, PushRangeRejectsNull) {
     std::array<FreeBlock, 3> blocks{};
     FreeList list;
@@ -39,7 +39,7 @@ TEST(FreeListTest, PushRangeRejectsNull) {
     EXPECT_EQ(list.size(), 0);
 }
 
-// 测试点 4: push_range 收到 count == 0 时拒绝入链
+// Test point 4: push_range rejects count == 0
 TEST(FreeListTest, PushRangeRejectsZeroCount) {
     std::array<FreeBlock, 3> blocks{};
     FreeList list;
@@ -50,7 +50,7 @@ TEST(FreeListTest, PushRangeRejectsZeroCount) {
     EXPECT_EQ(list.size(), 0);
 }
 
-// 测试点 5: overages 计数器的读改写往返
+// Test point 5: overages counter read-modify-write round trip
 TEST(FreeListTest, SetAndGetOverages) {
     FreeList list;
 
@@ -63,7 +63,7 @@ TEST(FreeListTest, SetAndGetOverages) {
     EXPECT_EQ(list.overages(), 0);
 }
 
-// 测试点 6: pop_range 保持原链顺序并正确终止
+// Test point 6: pop_range preserves original chain order and terminates correctly
 TEST(FreeListTest, PopRangeReturnsOrderedChain) {
     std::array<FreeBlock, 3> blocks{};
     blocks[0].next = &blocks[1];
@@ -84,7 +84,7 @@ TEST(FreeListTest, PopRangeReturnsOrderedChain) {
     EXPECT_EQ(blocks[2].next, nullptr);
 }
 
-// 测试点 7: pop_range 在链不足 n 时弹出全部
+// Test point 7: pop_range pops everything when chain shorter than n
 TEST(FreeListTest, PopRangePartialOnShortList) {
     std::array<FreeBlock, 2> blocks{};
     blocks[0].next = &blocks[1];
@@ -101,7 +101,7 @@ TEST(FreeListTest, PopRangePartialOnShortList) {
     EXPECT_TRUE(list.empty());
 }
 
-// 测试点 8: pop_range 空表返回空链
+// Test point 8: pop_range on empty list returns empty chain
 TEST(FreeListTest, PopRangeOnEmptyList) {
     FreeList list;
 
@@ -113,7 +113,7 @@ TEST(FreeListTest, PopRangeOnEmptyList) {
     EXPECT_TRUE(list.empty());
 }
 
-// 测试点 9: pop_range 保留链上剩余对象
+// Test point 9: pop_range keeps remaining objects on the chain
 TEST(FreeListTest, PopRangeKeepsRemainder) {
     std::array<FreeBlock, 5> blocks{};
     for (size_t i = 0; i < 4; ++i) {
@@ -136,7 +136,7 @@ TEST(FreeListTest, PopRangeKeepsRemainder) {
     EXPECT_EQ(blocks[4].next, nullptr);
 }
 
-// 测试点 10: pop_range 输出可直接回灌 push_range（对偶往返）
+// Test point 10: pop_range output can be fed back into push_range (round trip)
 TEST(FreeListTest, PopRangePushRangeRoundTrip) {
     std::array<FreeBlock, 4> blocks{};
     for (size_t i = 0; i < 3; ++i) {
