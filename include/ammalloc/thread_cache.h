@@ -23,16 +23,22 @@ namespace quota_policy {
 /// @brief Consecutive overflow trims that trigger quota decay.
 inline constexpr size_t kMaxOverages = 3;
 
-/// @brief Next quota after a successful central refill.
-/// Two-stage growth: exponential warmup below one batch, then linear growth up
-/// to 8 batches. Returns the unchanged quota at the ceiling.
-AM_NODISCARD size_t NextAfterRefill(size_t current, size_t batch) noexcept;
+/// @brief Quota ceiling expressed in batch multiples.
+///
+/// Caps `max_size` growth at `kMaxQuotaBatches * batch` after refill and
+/// derives the linear growth step (`batch / kMaxQuotaBatches`) above one batch.
+inline constexpr size_t kMaxQuotaBatches = 8;
 
 /// @brief Quota and overage counter after one overflow trim.
 struct QuotaState {
     size_t max_size;
     size_t overages;
 };
+
+/// @brief Next quota after a successful central refill.
+/// Two-stage growth: exponential warmup below one batch, then linear growth up
+/// to kMaxQuotaBatches batches. Returns the unchanged quota at the ceiling.
+AM_NODISCARD size_t NextAfterRefill(size_t current, size_t batch) noexcept;
 
 /// @brief Next quota state after a slow-path overflow release.
 /// Repeated overflow without intervening refill decays the quota by one batch

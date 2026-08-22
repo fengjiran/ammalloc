@@ -1,6 +1,3 @@
-// Copyright 2026 The AetherMind Authors
-// SPDX-License-Identifier: Apache-2.0
-//
 // Pure-function tests for the ThreadCache quota policy. The policy computes
 // the next quota/overage state only; state itself lives in FreeList and is
 // exercised by ThreadCacheTest.
@@ -12,9 +9,9 @@
 namespace ammalloc {
 namespace {
 
-// 测试点 1: 配额低于一个 batch 时指数增长
+// Test 1: exponential growth while the quota is below one batch.
 TEST(QuotaPolicyTest, RefillGrowsExponentiallyBelowBatch) {
-    const size_t batch = 8;
+    constexpr size_t batch = 8;
     EXPECT_EQ(quota_policy::NextAfterRefill(0, batch), 1);
     EXPECT_EQ(quota_policy::NextAfterRefill(1, batch), 2);
     EXPECT_EQ(quota_policy::NextAfterRefill(2, batch), 4);
@@ -24,36 +21,43 @@ TEST(QuotaPolicyTest, RefillGrowsExponentiallyBelowBatch) {
     EXPECT_EQ(quota_policy::NextAfterRefill(7, batch), 8);
 }
 
-// 测试点 2: 达到 batch 后线性增长，8 倍 batch 处封顶
+// Test 2: linear growth once past one batch, clamped at kMaxQuotaBatches * batch.
 TEST(QuotaPolicyTest, RefillGrowsLinearlyUpToEightBatches) {
-    const size_t batch = 16;// inc = max(1, 16 / 8) = 2
+    constexpr size_t batch = 16;// inc = max(1, 16 / kMaxQuotaBatches) = 2
     EXPECT_EQ(quota_policy::NextAfterRefill(16, batch), 18);
     EXPECT_EQ(quota_policy::NextAfterRefill(62, batch), 64);
-    EXPECT_EQ(quota_policy::NextAfterRefill(126, batch), 128);// clamp at 8*batch
-    EXPECT_EQ(quota_policy::NextAfterRefill(128, batch), 128);// ceiling: unchanged
-    EXPECT_EQ(quota_policy::NextAfterRefill(200, batch), 200);// above ceiling
+    // clamp at kMaxQuotaBatches * batch
+    EXPECT_EQ(quota_policy::NextAfterRefill(126, batch), quota_policy::kMaxQuotaBatches * batch);
+    // ceiling: unchanged
+    EXPECT_EQ(quota_policy::NextAfterRefill(quota_policy::kMaxQuotaBatches * batch, batch),
+              quota_policy::kMaxQuotaBatches * batch);
+    // above ceiling
+    EXPECT_EQ(quota_policy::NextAfterRefill(200, batch), 200);
 }
 
-// 测试点 3: batch = 1 特例（batch / 8 == 0，inc 取 1）
+// Test 3: batch = 1 special case (batch / kMaxQuotaBatches == 0, inc clamps to 1).
 TEST(QuotaPolicyTest, RefillWithTinyBatch) {
-    const size_t batch = 1;
+    constexpr size_t batch = 1;
     EXPECT_EQ(quota_policy::NextAfterRefill(0, batch), 1);
     EXPECT_EQ(quota_policy::NextAfterRefill(1, batch), 2);
     EXPECT_EQ(quota_policy::NextAfterRefill(2, batch), 3);
-    EXPECT_EQ(quota_policy::NextAfterRefill(7, batch), 8);
-    EXPECT_EQ(quota_policy::NextAfterRefill(8, batch), 8);
+    // clamp at kMaxQuotaBatches * batch = 8
+    EXPECT_EQ(quota_policy::NextAfterRefill(7, batch), quota_policy::kMaxQuotaBatches);
+    // ceiling: unchanged
+    EXPECT_EQ(quota_policy::NextAfterRefill(quota_policy::kMaxQuotaBatches, batch),
+              quota_policy::kMaxQuotaBatches);
 }
 
-// 测试点 4: 配额在 floor 处时 overflow 不保留衰减状态
+// Test 4: overflow at the floor keeps no decay state.
 TEST(QuotaPolicyTest, OverflowAtFloorResetsOverage) {
     const auto s = quota_policy::NextAfterOverflow(8, 8, 2);
     EXPECT_EQ(s.max_size, 8);
     EXPECT_EQ(s.overages, 0);
 }
 
-// 测试点 5: overflow 计数递增，达到 kMaxOverages 时衰减一个 batch
+// Test 5: the overage counter advances; decay kicks in at kMaxOverages.
 TEST(QuotaPolicyTest, OverflowDecaysAfterMaxOverages) {
-    const size_t batch = 8;
+    constexpr size_t batch = 8;
     const auto s1 = quota_policy::NextAfterOverflow(32, batch, 0);
     EXPECT_EQ(s1.max_size, 32);
     EXPECT_EQ(s1.overages, 1);
@@ -67,12 +71,23 @@ TEST(QuotaPolicyTest, OverflowDecaysAfterMaxOverages) {
     EXPECT_EQ(s3.overages, 0);
 }
 
-// 测试点 6: 衰减下限为 batch
+// Test 6: decay floors at one batch.
 TEST(QuotaPolicyTest, OverflowDecayFloorsAtBatch) {
-    const size_t batch = 16;
+    constexpr size_t batch = 16;
     const auto s = quota_policy::NextAfterOverflow(24, batch, 2);
     EXPECT_EQ(s.max_size, 16);// max(24 - 16, 16)
     EXPECT_EQ(s.overages, 0);
+}
+
+// Test 7: current below the floor is kept unchanged and overages reset.
+TEST(QuotaPolicyTest, OverflowBelowFloorKeepsCurrent) {
+    const auto s1 = quota_policy::NextAfterOverflow(4, 8, 3);
+    EXPECT_EQ(s1.max_size, 4);
+    EXPECT_EQ(s1.overages, 0);
+
+    const auto s2 = quota_policy::NextAfterOverflow(1, 16, 2);
+    EXPECT_EQ(s2.max_size, 1);
+    EXPECT_EQ(s2.overages, 0);
 }
 
 }// namespace
