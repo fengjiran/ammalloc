@@ -73,6 +73,7 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 - `FetchRange` 中 `GetOneSpan` 失败（OOM）→ 返回已取数量（可能 0），不重试。
 - TransferCache 满时预取剩余对象走 ReleaseListToSpans，保证所有权一致。
 - `PageMap::GetSpan` 返回 null（对象不属于 ammalloc）→ 跳过该对象（不崩溃，保持分配器鲁棒）。
+- 测试注入（`AMMALLOC_TEST`）：`g_mock_fetch_range_cap` 设 `0 < cap < batch_num` 时，`FetchRange` 至多返回 `cap` 个对象，用于确定性构造「部分 refill」。
 
 ## 8. 风险与权衡
 
@@ -87,8 +88,11 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 - 生命周期：`Reset`、`ReallocateAfterRelease`
 - 并发：`MultiThreadedAllocation`、`StressTest`、`FreeListOperations`
 
+此外，`tests/unit/test_thread_cache.cpp` 的 `PartialRefillHoldsQuotaAndOverage` 经 `g_mock_fetch_range_cap` 覆盖了 `FetchRange` 的部分返回分支。
+
 ## 10. 变更记录
 
 | 日期 | 变更 | 原因 | 关联 PR / ADR |
 |---|---|---|---|
 | 2026-08-19 | 初版（由架构总览 §5.2 拆分扩展） | 文档系统落地 | — |
+| 2026-08-21 | 补充 §7 测试注入 `g_mock_fetch_range_cap` 及 §9 部分 refill 测试引用 | 覆盖 FetchRange 部分返回 | — |

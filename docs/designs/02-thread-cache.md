@@ -132,7 +132,7 @@ return {current, overages + 1};                                             // �
 `tests/unit/test_thread_cache.cpp`：
 
 - 功能：`BasicAllocate`、`AllocateZero`、`BasicDeallocate`、`EdgeCases`、`DifferentSizeClasses`、`ReleaseAll`
-- 配额：`SlowStartGrowthThenOveragesShrinkMaxSize`（增长与衰减）、`TriggerReleaseTooLongList`、`SlowStartAndScavenge`、`MaxSizeStaysBoundedUnderSustainedLoad`（持续负载下有界收敛）
+- 配额：`SlowStartGrowthThenOveragesShrinkMaxSize`（增长与衰减）、`TriggerReleaseTooLongList`、`SlowStartAndScavenge`、`MaxSizeStaysBoundedUnderSustainedLoad`（持续负载下有界收敛）、`PartialRefillHoldsQuotaAndOverage`（部分 refill 保持配额与衰减信号）
 - 并发：`MultiThreadStress`、`MultiThreadedAllocation`、`MultiThreadedDifferentSizes`
 
 `tests/unit/test_ammalloc.cpp`：
@@ -149,3 +149,4 @@ return {current, overages + 1};                                             // �
 | 2026-08-19 | 初版（由架构总览 §5.1 拆分扩展） | 文档系统落地 | — |
 | 2026-08-21 | 补充 §6.1 慢启动与配额衰减策略（增长/衰减纯函数、数值演化、设计意图） | 沉淀慢启动实现逻辑 | — |
 | 2026-08-21 | 补充 §9 三个测试用例（TLS 生命周期、跨线程 free、配额有界收敛） | 覆盖 I1/I2 测试缺口 | — |
+| 2026-08-21 | 补充 §9 `PartialRefillHoldsQuotaAndOverage`（部分 refill 分支） | 覆盖 G1 测试缺口 | — |
