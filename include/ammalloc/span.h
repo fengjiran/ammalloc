@@ -117,6 +117,7 @@ struct alignas(SystemConfig::CACHE_LINE_SIZE) Span {
     /// @pre The corresponding CentralCache bucket lock is held.
     void FreeObject(void* ptr);
 };
+
 static_assert(sizeof(Span) == SystemConfig::CACHE_LINE_SIZE, "Span must be exactly 64 bytes");
 static_assert(alignof(Span) == SystemConfig::CACHE_LINE_SIZE, "Span alignment mismatch");
 
@@ -138,13 +139,21 @@ public:
 
     /// @brief Returns the first node.
     /// @return First Span, or `end()` when empty.
-    AM_NODISCARD Span* begin() noexcept { return head_.next; }
+    AM_NODISCARD Span* begin() const noexcept {
+        return head_.next;
+    }
+
     /// @brief Returns the circular sentinel.
     /// @return End sentinel; it is not an allocatable Span.
-    AM_NODISCARD Span* end() noexcept { return &head_; }
+    AM_NODISCARD Span* end() noexcept {
+        return &head_;
+    }
+
     /// @brief Reports whether the list has no nodes.
     /// @return True when `begin() == end()`.
-    AM_NODISCARD bool empty() const noexcept { return head_.next == &head_; }
+    AM_NODISCARD bool empty() const noexcept {
+        return head_.next == &head_;
+    }
 
     /// @brief Inserts a Span immediately before a list position.
     /// @param pos Existing node or sentinel that follows the insertion point.
@@ -161,17 +170,21 @@ public:
 
     /// @brief Inserts a Span at the front of the list.
     /// @param span Unlinked Span to insert.
-    void push_front(Span* span) noexcept { insert(begin(), span); }
+    void push_front(Span* span) const noexcept {
+        insert(begin(), span);
+    }
 
     /// @brief Inserts a Span at the back of the list.
     /// @param span Unlinked Span to insert.
-    void push_back(Span* span) noexcept { insert(end(), span); }
+    void push_back(Span* span) noexcept {
+        insert(end(), span);
+    }
 
     /// @brief Unlinks a Span without destroying its metadata.
     /// @param span Linked Span to remove.
     /// @return Node following the removed Span, possibly `end()`.
     /// @pre The lock protecting this list is held.
-    Span* erase(Span* span) noexcept {
+    Span* erase(Span* span) const noexcept {
         AM_DCHECK(span != nullptr && span != &head_);
         auto* prev = span->prev;
         auto* next = span->next;
@@ -184,7 +197,7 @@ public:
 
     /// @brief Removes the first Span without destroying its metadata.
     /// @return Removed Span, or null when the list is empty.
-    Span* pop_front() noexcept {
+    Span* pop_front() const noexcept {
         // clang-format off
         if (empty()) AM_UNLIKELY {
             return nullptr;
@@ -199,7 +212,6 @@ private:
     /// Inline sentinel that also anchors the circular links.
     Span head_;
 };
-
 
 }// namespace ammalloc
 
