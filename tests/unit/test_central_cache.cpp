@@ -2,7 +2,9 @@
 // Created by richard on 2/19/26.
 //
 #include "ammalloc/central_cache.h"
+#include "ammalloc/page_allocator.h"
 #include "ammalloc/page_cache.h"
+#include "ammalloc/thread_cache.h"
 
 #include <cstring>
 #include <gtest/gtest.h>
@@ -388,7 +390,7 @@ TEST_F(CentralCacheTest, FreeListMaxSize) {
     EXPECT_EQ(list.max_size(), 1000);
 }
 
-// 测试点 13: 小对象分配 (8 字节)
+// 测试点 13: 小对象分配（8 字节请求映射到最小 16 字节类）
 TEST_F(CentralCacheTest, SmallObjectAllocation) {
     FreeList list;
     size_t obj_size = 8;
@@ -425,6 +427,54 @@ TEST_F(CentralCacheTest, BoundarySizeAllocation) {
         head = obj;
     }
     central_cache_.ReleaseListToSpans(head, max_size);
+}
+
+// FetchRange returns a partial batch when supply is short: one Span with a
+// single free slot left and PageCache unable to refill (OOM) serve 15 of 16
+// requested objects. This is the partial-refill fact the ThreadCache quota
+// policy is built on (a partial refill must not grow the quota).
+TEST_F(CentralCacheTest, FetchRangeReturnsPartialOnShortSupply) {
+    // MAX_TC_SIZE class: batch == 2, span capacity 16, and the Span is exactly
+    // the 128-page refill unit (no spare Span left in PageCache). Its mapping
+    // (< 1 MiB) goes through AllocNormalPage, so the mock blocks new Span
+    // acquisition.
+    const size_t size = SizeConfig::MAX_TC_SIZE;
+    ASSERT_EQ(SizeClass::CalculateBatchSize(size), 2u);
+
+    // Take one object: the only Span has `capacity - 1` free slots left.
+    FreeList one;
+    ASSERT_EQ(central_cache_.FetchRange(one, 1, size), 1u);
+    void* first = one.pop();
+    auto* span = PageMap::GetSpan(first);
+    ASSERT_NE(span, nullptr);
+    const size_t capacity = span->capacity;
+    one.push(first);
+
+    // Request `capacity`: only `capacity - 1` are available before the Span is
+    // full and the mocked PageCache cannot supply a new one.
+    g_mock_normal_alloc_fail.store(true, std::memory_order_relaxed);
+    FreeList list;
+    const size_t fetched = central_cache_.FetchRange(list, capacity, size);
+    g_mock_normal_alloc_fail.store(false, std::memory_order_relaxed);
+
+    EXPECT_EQ(fetched, capacity - 1);
+    EXPECT_EQ(list.size(), capacity - 1);
+
+    // 清理
+    void* head = nullptr;
+    while (!one.empty()) {
+        void* obj = one.pop();
+        auto* block = static_cast<FreeBlock*>(obj);
+        block->next = static_cast<FreeBlock*>(head);
+        head = obj;
+    }
+    while (!list.empty()) {
+        void* obj = list.pop();
+        auto* block = static_cast<FreeBlock*>(obj);
+        block->next = static_cast<FreeBlock*>(head);
+        head = obj;
+    }
+    central_cache_.ReleaseListToSpans(head, size);
 }
 
 }// namespace

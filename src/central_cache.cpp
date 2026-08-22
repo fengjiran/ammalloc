@@ -2,6 +2,7 @@
 #include "ammalloc/assert.h"
 #include "ammalloc/page_cache.h"
 #include "ammalloc/spin_lock.h"
+
 #include <spdlog/spdlog.h>
 
 namespace ammalloc {
@@ -51,6 +52,10 @@ size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num, size_t a
             if (bucket.span_list.empty() ||
                 bucket.span_list.begin()->use_count >= bucket.span_list.begin()->capacity) {
                 if (!GetOneSpan(bucket, aligned_size, lock)) {
+                    // GetOneSpan releases the lock before calling PageCache and
+                    // leaves it unlocked on failure; reacquire so the unique_lock
+                    // destructor/unlock below cannot throw on an unlocked mutex.
+                    lock.lock();
                     break;
                 }
             }
