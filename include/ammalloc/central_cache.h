@@ -10,9 +10,18 @@
 #include "ammalloc/span.h"
 #include "ammalloc/spin_lock.h"
 
+#include <atomic>
 #include <mutex>
 
 namespace ammalloc {
+
+#ifdef AMMALLOC_TEST
+// Test-only hook: when set to 0 < cap < batch_num, FetchRange returns at most
+// `cap` objects, forcing a partial refill at the ThreadCache layer.
+extern std::atomic<size_t> g_mock_fetch_range_cap;
+#else
+#define g_mock_fetch_range_cap (0)
+#endif
 
 /// @brief Balances small objects between ThreadCache and PageCache.
 ///

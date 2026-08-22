@@ -562,4 +562,31 @@ TEST_F(ThreadCacheTest, MaxSizeStaysBoundedUnderSustainedLoad) {
     for (void* p : held) tc.Deallocate(p, idx);
     tc.ReleaseAll();
 }
+
+// A partial refill (0 < fetched < fetch_num) signals memory pressure and must
+// NOT grow the quota or reset the decay signal (the M3 fix). Forcing the partial
+// result by capping CentralCache::FetchRange at one object exercises this branch.
+TEST_F(ThreadCacheTest, PartialRefillHoldsQuotaAndOverage) {
+    thread_local ThreadCache tc;
+    const size_t size = SizeClass::RoundUp(64);
+    const size_t idx = SizeClass::Index(size);
+
+    // First refill grows max_size 1 -> 2, so the next fetch_num is 2, making a
+    // partial result (1) observably smaller than the requested amount.
+    void* p1 = tc.Allocate(size);
+    ASSERT_NE(p1, nullptr);
+    ASSERT_EQ(tc.GetMaxSizeForTest(idx), 2u);
+
+    g_mock_fetch_range_cap.store(1, std::memory_order_relaxed);
+    void* p2 = tc.Allocate(size);
+    g_mock_fetch_range_cap.store(0, std::memory_order_relaxed);
+
+    ASSERT_NE(p2, nullptr);
+    EXPECT_EQ(tc.GetMaxSizeForTest(idx), 2u);   // quota unchanged
+    EXPECT_EQ(tc.GetOveragesForTest(idx), 0u);  // decay signal preserved
+
+    tc.Deallocate(p1, idx);
+    tc.Deallocate(p2, idx);
+    tc.ReleaseAll();
+}
 }// namespace

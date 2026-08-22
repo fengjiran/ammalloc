@@ -7,8 +7,18 @@
 
 namespace ammalloc {
 
+#ifdef AMMALLOC_TEST
+std::atomic<size_t> g_mock_fetch_range_cap{0};
+#endif
+
 size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num, size_t aligned_size) {
     AM_DCHECK(batch_num <= SizeClass::kMaxBatchSize);
+#ifdef AMMALLOC_TEST
+    if (const size_t cap = g_mock_fetch_range_cap.load(std::memory_order_relaxed);
+        cap > 0 && cap < batch_num) {
+        batch_num = cap;
+    }
+#endif
     auto idx = SizeClass::Index(aligned_size);
     auto& bucket = buckets_[idx];
 
