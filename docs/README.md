@@ -49,6 +49,7 @@
 | [cpp_comment_guidelines.md](guides/cpp_comment_guidelines.md) | 注释与 Doxygen 规范 | Current |
 | [test_writing_guidelines.md](guides/test_writing_guidelines.md) | GoogleTest 测试编写规范 | Current |
 | [code_review_guide.md](guides/code_review_guide.md) | 代码审查方法（风险分级驱动） | Current |
+| [benchmark-framework-design.md](guides/benchmark-framework-design.md) | Benchmark Framework 与科学可信的性能实验规范 | Current |
 
 ### 架构决策记录（docs/decisions/）
 
