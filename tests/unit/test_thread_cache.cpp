@@ -533,4 +533,33 @@ TEST_F(ThreadCacheTest, BenchmarkVsStdMalloc) {
     // EXPECT_LT(diff_tc.count(), diff_std.count());
 }
 
+// The per-class quota stays bounded under sustained mixed pressure: never zero
+// (which would make refill fail permanently) and never above
+// quota_policy::kMaxQuotaBatches * batch.
+TEST_F(ThreadCacheTest, MaxSizeStaysBoundedUnderSustainedLoad) {
+    thread_local ThreadCache tc;
+    const size_t size = SizeClass::RoundUp(1024);
+    const size_t idx = SizeClass::Index(size);
+    const size_t batch = SizeClass::CalculateBatchSize(size);
+
+    std::vector<void*> held;
+    for (int round = 0; round < 200; ++round) {
+        for (int i = 0; i < 64; ++i) {
+            void* p = tc.Allocate(size);
+            ASSERT_NE(p, nullptr);
+            held.push_back(p);
+        }
+        for (int i = 0; i < 32; ++i) {
+            tc.Deallocate(held.back(), idx);
+            held.pop_back();
+        }
+
+        const size_t ms = tc.GetMaxSizeForTest(idx);
+        EXPECT_GE(ms, 1u);
+        EXPECT_LE(ms, batch * quota_policy::kMaxQuotaBatches);
+    }
+
+    for (void* p : held) tc.Deallocate(p, idx);
+    tc.ReleaseAll();
+}
 }// namespace

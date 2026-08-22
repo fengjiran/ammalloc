@@ -96,3 +96,48 @@ TEST(AmMallocOomTest, FreeFallsBackToCentralCacheWhenThreadCacheInitFails) {
     });
     verifier.join();
 }
+
+// Thread exit with a live cache runs ThreadCacheCleaner, which must drain every
+// FreeList back to CentralCache (ReleaseAll) and free the metadata page
+// (ReleaseThreadCache) without crashing or leaking. The OOM tests above only
+// cover the injected-failure branch, not this teardown happy path.
+TEST(AmMallocThreadExitTest, ThreadExitDrainsCacheToCentralCache) {
+    std::thread worker([] {
+        constexpr size_t kSize = 64;
+        constexpr int kAllocs = 2000;
+        std::vector<void*> held;
+        held.reserve(kAllocs);
+        for (int i = 0; i < kAllocs; ++i) {
+            void* p = am_malloc(kSize);
+            EXPECT_NE(p, nullptr);
+            if (p) held.push_back(p);
+        }
+        for (void* p : held) am_free(p);
+    });
+    worker.join();
+    ExpectAlignedAllocations(64, 64);
+}
+
+// Cross-thread free: an object allocated on one thread is freed on another, so
+// am_free re-reads span->size_class_idx and pushes the object into the freeing
+// thread's own FreeList (cache-ownership migration). The freer starts with no
+// ThreadCache, exercising am_free_slow_path -> CreateThreadCache.
+TEST(AmMallocCrossThreadFreeTest, FreeOnDifferentThread) {
+    constexpr size_t kSize = 64;
+    constexpr int kCount = 100;
+    std::vector<void*> held;
+    held.reserve(kCount);
+    for (int i = 0; i < kCount; ++i) {
+        void* p = am_malloc(kSize);
+        ASSERT_NE(p, nullptr);
+        static_cast<char*>(p)[0] = 'a';
+        held.push_back(p);
+    }
+    std::thread freer([&held] {
+        for (void* p : held) am_free(p);
+    });
+    freer.join();
+    void* q = am_malloc(kSize);
+    ASSERT_NE(q, nullptr);
+    am_free(q);
+}
