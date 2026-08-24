@@ -16,14 +16,13 @@ void Span::Init(size_t aligned_object_size) {
     size_t bitmap_num = (max_objs + 64 - 1) >> 6;
     auto* bitmap = new (start_ptr) uint64_t[bitmap_num];
 
-    // Calculate data start with alignment padding.
     uintptr_t data_start = reinterpret_cast<uintptr_t>(bitmap) + bitmap_num * 8;
-    data_start = (data_start + SystemConfig::ALIGNMENT - 1) & ~(SystemConfig::ALIGNMENT - 1);
+    data_start = detail::AlignUp(data_start, SystemConfig::ALIGNMENT);
     obj_offset = static_cast<uint32_t>(data_start - reinterpret_cast<uintptr_t>(start_ptr));
 
     // Capacity may be less than max_objs due to alignment overhead.
     uintptr_t data_end = reinterpret_cast<uintptr_t>(start_ptr) + total_bytes;
-    capacity = (data_start >= data_end) ? 0 : (data_end - data_start) / aligned_obj_size;
+    capacity = data_start >= data_end ? 0 : (data_end - data_start) / aligned_obj_size;
 
     // Initialize bitmap: set first 'capacity' bits to 1 (free).
     size_t full_bitmap_num = capacity / 64;
