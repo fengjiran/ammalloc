@@ -70,10 +70,14 @@ void* Span::AllocObject() {
 }
 
 void Span::FreeObject(void* ptr) {
-    const char* base_ptr = static_cast<char*>(GetDataBasePtr());
-    AM_DCHECK(static_cast<char*>(ptr) >= base_ptr, "Pointer underflow detected!");
-    size_t offset = static_cast<char*>(ptr) - base_ptr;
-    AM_DCHECK(offset % aligned_obj_size == 0);
+    // Use uintptr_t arithmetic so an arbitrary caller pointer does not trigger
+    // undefined pointer subtraction before the range check can run.
+    const auto base = reinterpret_cast<uintptr_t>(GetDataBasePtr());
+    const auto uptr = reinterpret_cast<uintptr_t>(ptr);
+    const size_t offset = uptr - base;
+    AM_HCHECK(uptr >= base, "Pointer underflow detected!");
+    AM_HCHECK(offset % aligned_obj_size == 0, "Pointer misaligned!");
+
     size_t global_obj_idx = 0;
     // clang-format off
     if (std::has_single_bit(static_cast<size_t>(aligned_obj_size))) AM_LIKELY {
@@ -83,16 +87,32 @@ void Span::FreeObject(void* ptr) {
     }
     // clang-format on
 
-    AM_DCHECK(global_obj_idx < capacity, "Pointer overflow detected!");
+    AM_HCHECK(global_obj_idx < capacity, "Pointer overflow detected!");
     auto bitmap_idx = static_cast<uint32_t>(global_obj_idx >> 6);
-    AM_DCHECK(bitmap_idx < GetBitmapNum());
+    AM_HCHECK(bitmap_idx < GetBitmapNum());
     int bit_pos = static_cast<int>(global_obj_idx & 63);
     uint64_t mask = 1ull << bit_pos;
     auto* bitmap = GetBitmap();
-    AM_DCHECK((bitmap[bitmap_idx] & mask) == 0, "double free detected.");
+    AM_HCHECK((bitmap[bitmap_idx] & mask) == 0, "double free detected.");
+    AM_HCHECK(use_count > 0, "use_count underflow detected.");
     bitmap[bitmap_idx] |= mask;
     --use_count;
     scan_cursor = std::min(scan_cursor, bitmap_idx);
+}
+
+size_t Span::ObjectSlotOf(void* ptr) const noexcept {
+    const auto base = reinterpret_cast<uintptr_t>(GetDataBasePtr());
+    const auto uptr = reinterpret_cast<uintptr_t>(ptr);
+    const size_t span_bytes = static_cast<size_t>(capacity) * aligned_obj_size;
+    if (uptr < base || uptr - base >= span_bytes) {
+        return std::numeric_limits<size_t>::max();
+    }
+
+    const size_t offset = uptr - base;
+    if (offset % aligned_obj_size != 0) {
+        return std::numeric_limits<size_t>::max();
+    }
+    return offset / aligned_obj_size;
 }
 
 }// namespace ammalloc

@@ -120,6 +120,7 @@ AM_NOINLINE void* am_malloc_slow_path(size_t original_size) {
 AM_NOINLINE void am_free_slow_path(void* ptr, Span* span, size_t aligned_size) {
     // Large-object Spans do not carry an object size and return directly to PageCache.
     if (aligned_size == 0) {
+        AM_HCHECK(ptr == span->GetPageBaseAddr(), "Invalid large-object pointer.");
         PageCache::GetInstance().ReleaseSpan(span);
         return;
     }
@@ -173,6 +174,8 @@ void am_free(void* ptr) {
     }
     // clang-format on
 
+    AM_HCHECK(span->ObjectSlotOf(ptr) != std::numeric_limits<size_t>::max(),
+              "Invalid small-object pointer.");
     tc->Deallocate(ptr, span->size_class_idx);
 }
 

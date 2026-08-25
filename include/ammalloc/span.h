@@ -116,6 +116,16 @@ struct alignas(SystemConfig::CACHE_LINE_SIZE) Span {
     /// @param ptr Object slot previously allocated from this Span.
     /// @pre The corresponding CentralCache bucket lock is held.
     void FreeObject(void* ptr);
+
+    /// @brief Resolves a pointer to its object-slot index without touching the
+    ///        bitmap. Uses uintptr_t arithmetic so the comparison stays defined
+    ///        for arbitrary caller pointers.
+    /// @param ptr Address alleged to reference one object slot in this Span.
+    /// @return Zero-based slot index, or `std::numeric_limits<size_t>::max()`
+    ///         when `ptr` is out of range or misaligned. Large-object Spans
+    ///         (`capacity == 0`) always yield that sentinel; callers validate
+    ///         those against `GetPageBaseAddr()`.
+    AM_NODISCARD size_t ObjectSlotOf(void* ptr) const noexcept;
 };
 
 static_assert(sizeof(Span) == SystemConfig::CACHE_LINE_SIZE, "Span must be exactly 64 bytes");
