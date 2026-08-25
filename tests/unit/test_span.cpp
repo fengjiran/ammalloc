@@ -62,4 +62,53 @@ TEST_F(SpanTest, DoubleFreeCorruption) {
     PageAllocator::SystemFree(ptr, page_num);
 }
 
+// Stack-local single-page Span with fixed-size slots, backed by SystemAlloc.
+// Used only by death tests below; each aborts in the forked child, so the
+// backing mapping is intentionally never returned to the OS.
+struct TestSpan {
+    void* base = nullptr;
+    Span span;
+
+    explicit TestSpan(size_t obj_size)
+        : base(PageAllocator::SystemAlloc(1)),
+          span(detail::PtrToPageId(base), 1) {
+        span.Init(obj_size);
+    }
+};
+
+TEST_F(SpanTest, FreeObjectUnderflowDeath) {
+#if defined(AM_HARDENED) || !defined(NDEBUG)
+    TestSpan ts(16);
+    char* below = static_cast<char*>(ts.span.GetDataBasePtr()) - 16;
+    EXPECT_DEATH(ts.span.FreeObject(below), "Check failed");
+#endif
+}
+
+TEST_F(SpanTest, FreeObjectOverflowDeath) {
+#if defined(AM_HARDENED) || !defined(NDEBUG)
+    TestSpan ts(16);
+    char* data_end = static_cast<char*>(ts.span.GetDataBasePtr()) +
+                     ts.span.capacity * ts.span.aligned_obj_size;
+    EXPECT_DEATH(ts.span.FreeObject(data_end), "Check failed");
+#endif
+}
+
+TEST_F(SpanTest, FreeObjectMisalignedDeath) {
+#if defined(AM_HARDENED) || !defined(NDEBUG)
+    TestSpan ts(16);
+    char* misaligned = static_cast<char*>(ts.span.GetDataBasePtr()) + 1;
+    EXPECT_DEATH(ts.span.FreeObject(misaligned), "Check failed");
+#endif
+}
+
+TEST_F(SpanTest, FreeObjectDoubleFreeDeath) {
+#if defined(AM_HARDENED) || !defined(NDEBUG)
+    TestSpan ts(16);
+    void* obj = ts.span.AllocObject();
+    ASSERT_NE(obj, nullptr);
+    ts.span.FreeObject(obj);                              // normal free
+    EXPECT_DEATH(ts.span.FreeObject(obj), "Check failed");// double free
+#endif
+}
+
 }// namespace

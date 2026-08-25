@@ -141,3 +141,26 @@ TEST(AmMallocCrossThreadFreeTest, FreeOnDifferentThread) {
     ASSERT_NE(q, nullptr);
     am_free(q);
 }
+
+// am_free resolves the pointer's owning Span through PageMap and dispatches to
+// its recorded size class. Hardened builds abort on interior/out-of-range
+// frees instead of corrupting metadata. These death tests are active in Debug
+// and in AM_HARDENED release builds; in a plain release build the checks are
+// compiled out, so the bodies are empty.
+TEST(AmMallocHardeningTest, LargeObjectInteriorPointerDeath) {
+#if defined(AM_HARDENED) || !defined(NDEBUG)
+    void* p = am_malloc(SizeConfig::MAX_TC_SIZE + 1);
+    ASSERT_NE(p, nullptr);
+    EXPECT_DEATH(am_free(static_cast<char*>(p) + 8), "Check failed");
+    am_free(p);
+#endif
+}
+
+TEST(AmMallocHardeningTest, SmallObjectInteriorPointerDeath) {
+#if defined(AM_HARDENED) || !defined(NDEBUG)
+    void* p = am_malloc(64);
+    ASSERT_NE(p, nullptr);
+    EXPECT_DEATH(am_free(static_cast<char*>(p) + 1), "Check failed");
+    am_free(p);
+#endif
+}
