@@ -7,6 +7,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(BUILD_TESTS "Adding test targets." ON)
 option(BUILD_BENCHMARKS "Adding benchmark targets." ON)
 option(USE_57BIT_VA "System use 57bits virtual address space." OFF)
+option(AM_HARDENED "Enable release-time free/double-free/interior-pointer guards." OFF)
 
 add_subdirectory(src)
 

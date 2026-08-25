@@ -30,6 +30,12 @@ if (USE_57BIT_VA)
     target_compile_definitions(${PROJECT_NAME} PUBLIC AM_USE_57BIT_VA)
 endif ()
 
+if (AM_HARDENED)
+    # PUBLIC: assert.h's AM_HCHECK depends on this macro; test targets inherit
+    # it through linking so release-hardening remains ABI-consistent.
+    target_compile_definitions(${PROJECT_NAME} PUBLIC AM_HARDENED)
+endif ()
+
 if (BUILD_TESTS)
     # PUBLIC: page_cache.h/page_allocator.h expose test-only helpers under
     # AMMALLOC_TEST; test targets inherit it through linking.

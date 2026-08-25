@@ -77,7 +77,21 @@ void HandleCheckFailed(std::string_view condition,
         if (static_cast<bool>(condition)) [[likely]]; \
         else
 #else
-#define AM_DCHECK(condition, ...) AM_CHECK(condition __VA_OPT__(, ) __VA_ARGS__)
+#define AM_DCHECK(condition, ...) AM_CHECK(condition __VA_OPT__(,) __VA_ARGS__)
+#endif
+
+/// @brief Release-visible safety guard against caller-supplied bad pointers.
+///
+/// Unlike `AM_DCHECK` (a debug-only internal invariant), this check protects
+/// against invalid caller inputs (double-free, interior pointer, out-of-range
+/// free) that can corrupt bitmap/use_count/Span metadata. It is active in every
+/// debug build and in release builds only when `AM_HARDENED` is defined; a
+/// failure aborts with the same `Check failed` contract as `AM_CHECK` and
+/// produces no code when disabled.
+#if defined(AM_HARDENED) || !defined(NDEBUG)
+#define AM_HCHECK(condition, ...) AM_CHECK(condition __VA_OPT__(,) __VA_ARGS__)
+#else
+#define AM_HCHECK(condition, ...) ((void)0)
 #endif
 
 #endif// AMMALLOC_ASSERT_H
