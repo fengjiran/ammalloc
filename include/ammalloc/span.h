@@ -197,7 +197,7 @@ public:
 
     /// @brief Removes the first Span without destroying its metadata.
     /// @return Removed Span, or null when the list is empty.
-    Span* pop_front() const noexcept {
+    AM_NODISCARD Span* pop_front() const noexcept {
         // clang-format off
         if (empty()) AM_UNLIKELY {
             return nullptr;

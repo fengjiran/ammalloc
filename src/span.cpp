@@ -83,6 +83,7 @@ void Span::FreeObject(void* ptr) {
     }
     // clang-format on
 
+    AM_DCHECK(global_obj_idx < capacity, "Pointer overflow detected!");
     auto bitmap_idx = static_cast<uint32_t>(global_obj_idx >> 6);
     AM_DCHECK(bitmap_idx < GetBitmapNum());
     int bit_pos = static_cast<int>(global_obj_idx & 63);
