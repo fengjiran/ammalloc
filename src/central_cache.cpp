@@ -181,7 +181,7 @@ void CentralCache::ReleaseListToSpans(void* start, size_t aligned_size) {
 }
 
 void CentralCache::Reset() noexcept {
-    for (size_t i = 0; i < kNumSizeClasses; ++i) {
+    for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
         auto& bucket = buckets_[i];
         void* head = nullptr;
         bucket.transfer_cache_lock.lock();
@@ -225,17 +225,13 @@ void CentralCache::Reset() noexcept {
 
     // Bucket zero retains the base of the one contiguous TransferCache mapping.
     if (buckets_[0].transfer_cache) {
-        size_t total_ptrs = 0;
-        for (size_t i = 0; i < kNumSizeClasses; ++i) {
-            size_t batch_num = SizeClass::CalculateBatchSize(SizeClass::Size(i));
-            total_ptrs += kCapScale * batch_num;
-        }
+        size_t total_ptrs = CalculateTotalTransferPtrs();
         size_t total_bytes = total_ptrs * sizeof(void*);
         size_t page_num = (total_bytes + SystemConfig::PAGE_SIZE - 1) >> SystemConfig::PAGE_SHIFT;
         PageAllocator::SystemFree(buckets_[0].transfer_cache, page_num);
 
         // Invalidate every borrowed slice after releasing the shared mapping.
-        for (size_t i = 0; i < kNumSizeClasses; ++i) {
+        for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
             auto& bucket = buckets_[i];
             bucket.transfer_cache = nullptr;
             bucket.transfer_cache_capacity = 0;
@@ -244,12 +240,17 @@ void CentralCache::Reset() noexcept {
     }
 }
 
-void CentralCache::InitTransferCache() {
+size_t CentralCache::CalculateTotalTransferPtrs() noexcept {
     size_t total_ptrs = 0;
-    for (size_t i = 0; i < kNumSizeClasses; ++i) {
+    for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
         size_t batch_num = SizeClass::CalculateBatchSize(SizeClass::Size(i));
         total_ptrs += kCapScale * batch_num;
     }
+    return total_ptrs;
+}
+
+void CentralCache::InitTransferCache() {
+    size_t total_ptrs = CalculateTotalTransferPtrs();
 
     // One PageAllocator mapping avoids recursive am_malloc entry and per-bucket VMAs.
     size_t total_bytes = total_ptrs * sizeof(void*);
@@ -261,7 +262,7 @@ void CentralCache::InitTransferCache() {
     }
 
     auto** cur_ptr = static_cast<void**>(p);
-    for (size_t i = 0; i < kNumSizeClasses; ++i) {
+    for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
         size_t batch_num = SizeClass::CalculateBatchSize(SizeClass::Size(i));
         buckets_[i].transfer_cache_capacity = batch_num * kCapScale;
         buckets_[i].transfer_cache = cur_ptr;
@@ -269,7 +270,8 @@ void CentralCache::InitTransferCache() {
     }
 }
 
-Span* CentralCache::GetOneSpan(Bucket& bucket, size_t aligned_size, std::unique_lock<std::mutex>& lock) {
+Span* CentralCache::GetOneSpan(Bucket& bucket, size_t aligned_size,
+                               std::unique_lock<std::mutex>& lock) {
     lock.unlock();
     auto page_num = SizeClass::GetMovePageNum(aligned_size);
     auto* span = PageCache::GetInstance().AllocSpan(page_num);

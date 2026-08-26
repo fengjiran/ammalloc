@@ -11,6 +11,7 @@
 #include "ammalloc/spin_lock.h"
 
 #include <atomic>
+#include <cstddef>// offsetof in the Bucket layout static_asserts below
 #include <mutex>
 
 namespace ammalloc {
@@ -42,11 +43,26 @@ class CentralCache {
         /// Borrowed slice of the contiguous TransferCache backing allocation.
         void** transfer_cache{nullptr};
 
+        // Starts on a fresh cache line: the TransferCache lock and this mutex
+        // are held independently by different threads, and sharing a line would
+        // ping-pong it between cores on hot size classes.
         /// Mutex protecting `span_list` and Span bitmap operations.
-        std::mutex span_list_lock;
+        alignas(SystemConfig::CACHE_LINE_SIZE) std::mutex span_list_lock;
+
+        // The 64-aligned inline sentinel then starts on its own line.
         /// Allocation-free intrusive list of borrowed Span metadata.
         SpanList span_list;
     };
+
+    // False-sharing guard: the two bucket locks are acquired independently by
+    // different threads (AGENTS.md §4.2); the member alignment above must keep
+    // them apart.
+    static_assert(offsetof(Bucket, span_list_lock) >= SystemConfig::CACHE_LINE_SIZE,
+                  "span_list_lock must not share a cache line with transfer_cache_lock");
+    // `std::array` lays buckets back to back; a line-multiple size keeps each
+    // bucket's cache lines disjoint from its neighbors'.
+    static_assert(sizeof(Bucket) % SystemConfig::CACHE_LINE_SIZE == 0,
+                  "Bucket size must be a multiple of the cache line size");
 
 public:
     /// @brief Returns the process-wide CentralCache.
@@ -87,6 +103,11 @@ private:
     /// @note Uses PageAllocator directly to prevent recursive `am_malloc` entry.
     void InitTransferCache();
 
+    /// @brief Returns the total pointer capacity of all TransferCache buckets.
+    /// @note Single source of truth for the contiguous backing size; shared by
+    ///       InitTransferCache (allocation) and Reset (release).
+    static size_t CalculateTotalTransferPtrs() noexcept;
+
     /// @brief Obtains and initializes a Span for one bucket.
     /// @param bucket Bucket that receives the Span.
     /// @param aligned_size Object size used to initialize Span metadata.
@@ -94,12 +115,12 @@ private:
     ///        while entering PageCache and reacquired before insertion.
     /// @return Borrowed Span owned by PageCache, or null on allocation failure.
     /// @pre `lock` owns `bucket.span_list_lock`.
-    static Span* GetOneSpan(Bucket& bucket, size_t aligned_size, std::unique_lock<std::mutex>& lock);
+    static Span* GetOneSpan(Bucket& bucket, size_t aligned_size,
+                            std::unique_lock<std::mutex>& lock);
 
-    constexpr static size_t kNumSizeClasses = SizeClass::Index(SizeConfig::MAX_TC_SIZE) + 1;
     constexpr static size_t kCapScale = 8;
     /// One independently synchronized bucket per size class.
-    std::array<Bucket, kNumSizeClasses> buckets_{};
+    std::array<Bucket, SizeClass::kNumSizeClasses> buckets_{};
 };
 
 
