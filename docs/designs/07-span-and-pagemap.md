@@ -63,15 +63,16 @@ Span 描述一段连续页区间及其对象分配状态，是 PageCache 切分/
 
 ```
 bitmap 放页区起始（1 bit/对象），数据区按 ALIGNMENT 对齐其后：
-  max_objs  ≈ (总字节 × 8) / (obj_size × 8 + 1)
+  max_objs  ≈ (总字节 × BITS_PER_BYTE) / (obj_size × BITS_PER_BYTE + 1)
   capacity  = 对齐后 (data_end - data_start) / obj_size（可能小于 max_objs）
 ```
+- bitmap 字几何常量统一取自 `SystemConfig::BITMAP_BITS/SHIFT/MASK` 与 `BITS_PER_BYTE`（config.h，分别派生自 `std::countr_zero` 与 `std::numeric_limits<unsigned char>::digits`），代码中不出现 64/63/6/8 字面量；字数按 `(max_objs + BITMAP_MASK) >> BITMAP_SHIFT` 取整。
 - 不存数据指针，`obj_offset` 派生存取，保证 Span 保持 64B。
 
 ### 6.2 AllocObject / FreeObject
 
-- 分配：从 `scan_cursor` 起扫描 64 位字，`std::countr_zero` 取首个空闲位；字满则推进游标。
-- 释放：按对象偏移反算全局索引（2 的幂尺寸走移位），置位并回退 `scan_cursor`；double-free 触发 `AM_DCHECK`。
+- 分配：从 `scan_cursor` 起扫描 `BITMAP_BITS` 位字，`std::countr_zero` 取首个空闲位；字满则推进游标。
+- 释放：按对象偏移反算全局索引（2 的幂尺寸走移位），置位并回退 `scan_cursor`；double-free 触发 `AM_HCHECK`。
 
 ### 6.3 PageMap 查询（48-bit 模式）
 
@@ -88,7 +89,7 @@ i1/i2/i3 各取 9 bit；逐层 acquire load，任一空层返回 null。
 ## 7. 边界条件与错误处理
 
 - `page_id` 越界（`i0 >= RADIX_ROOT_SIZE`）→ `GetSpan` 返回 null（对未知地址的释放被 `am_free` 忽略）。
-- `FreeObject` 越界/错位指针：`AM_DCHECK` 下溢与对齐检查（debug 崩溃、release 交由调用契约）。
+- `FreeObject` 越界/错位指针：`AM_HCHECK` 下溢、对齐与溢出检查（debug 构建及 `AM_HARDENED` release 崩溃，其余 release 交由调用契约）。
 - `Init` 时容量为 0（对齐开销超过页区）：`AllocObject` 恒 null，该 Span 不被分配使用。
 
 ## 8. 风险与权衡

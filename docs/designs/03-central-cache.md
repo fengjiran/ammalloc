@@ -30,15 +30,30 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 |---|---|---|
 | `Bucket::transfer_cache` | 该类的指针数组（借自全局连续映射） | `SpinLock`（`transfer_cache_lock`）保护 |
 | `Bucket::transfer_cache_count/capacity` | 有效指针数 / 容量 | 同上 |
-| `Bucket::span_list` | 该类可分配 Span 的借用链表 | `std::mutex`（`span_list_lock`）保护 |
+| `Bucket::span_list` | 该类可分配 Span 的借用链表 | `std::mutex`（`span_list_lock`）保护；与 TransferCache 域分处不同缓存行 |
 | `FreeBlock` | 空闲对象体内的侵入式 next 指针 | 无额外分配 |
-| `Bucket` | 每尺寸类别一个桶 | `alignas(64)` 隔离相邻桶锁 |
+| `Bucket` | 每尺寸类别一个桶 | `alignas(64)`；三缓存行分区，双锁与相邻桶均不共享缓存行（见 §3.1） |
+
+### 3.1 Bucket 缓存行布局
+
+`Bucket` 大小为 192B（3 个缓存行），每个缓存行承载一个独立热域：
+
+| 缓存行 | 内容 | 保护 |
+|---|---|---|
+| 行 0 | `transfer_cache_lock` + `transfer_cache_count/capacity` + `transfer_cache` | `transfer_cache_lock` |
+| 行 1 | `span_list_lock`（成员级 `alignas(64)` 起始） | `span_list_lock` 自身 |
+| 行 2 | `span_list`（64 对齐内联哨兵） | `span_list_lock` |
+
+- 两把桶锁可被不同线程**独立持有**（快路径锁与慢路径锁分时获取、可并发并存），分处不同缓存行避免跨核伪共享乒乓。
+- `span_list_lock` 采用成员级 `alignas(64)` 而非手工 pad：由编译器计算填充量，不依赖 `std::mutex` 的具体大小（libstdc++ 40B / libc++ 8B 均适用）。
+- 编译期不变量：`static_assert(offsetof(Bucket, span_list_lock) >= 64)`（双锁不同行）、`static_assert(sizeof(Bucket) % 64 == 0)`（`std::array` 连续排布下相邻桶零重叠）。
 
 ## 4. 并发模型
 
 - **双锁分层**：`SpinLock` 保护 TransferCache（短临界区，快路径）；`std::mutex` 保护 SpanList 与 bitmap 操作（慢路径）。
 - **锁顺序（allocator lock order）**：**桶锁内不进 PageCache**。`GetOneSpan` 在 `span_list_lock` 内发现无可用 Span 时先 `unlock()`，再进入 PageCache，取回后重新加锁插入；`ReleaseListToSpans` 在空 Span 归还 PageCache 前同样先释放桶锁。此顺序避免 CentralCache 桶锁 → PageCache 分片锁的倒置死锁。
 - **预取发布**：SpanList 中预取的指针在**离开 Span bitmap 锁域后**才写入 TransferCache；TransferCache 满时多余对象走 `ReleaseListToSpans` 正常归还路径。
+- **伪共享防护**：`Bucket` 三缓存行分区（§3.1），`transfer_cache_lock` 与 `span_list_lock` 分处不同行；相邻桶因 `sizeof(Bucket) % 64 == 0` 亦零重叠。
 - **单例**：进程级单例，构造即初始化 TransferCache。
 
 ## 5. 接口定义
@@ -50,6 +65,7 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 | `Reset` | `void Reset() noexcept` | 测试/受控 teardown：还原 bitmap、归还 Span、释放 backing | ❌ |
 | `GetOneSpan` | `static Span* (Bucket&, size_t, std::unique_lock&)` | 私有；持有桶锁进入，PageCache 期间释放 | ❌ |
 | `InitTransferCache` | `void InitTransferCache()` | 私有；构造期单次 SystemAlloc | ❌ |
+| `CalculateTotalTransferPtrs` | `static size_t () noexcept` | 私有；TransferCache 总指针容量单一来源，分配与释放共用 | ❌ |
 
 ## 6. 算法与流程
 
@@ -79,6 +95,7 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 
 - **预取无界**：`TODO(ammalloc): Bound prefetching by the observed TransferCache capacity`——极端批量下可能产生多余预取与回退开销。
 - **双锁开销**：快路径仍需 SpinLock；换取的收益是 SpanList 慢路径不阻塞 TransferCache 操作。
+- **布局刚性**：缓存行分区假设 `std::mutex` 尺寸 ≤ 64B（libstdc++ 40B / libc++ 8B 均满足）；若未来替换为 ≥64B 的锁实现，`span_list` 将推入更后缓存行，需复查 §3.1 的 static_assert。
 
 ## 9. 测试要点
 
@@ -96,3 +113,5 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 |---|---|---|---|
 | 2026-08-19 | 初版（由架构总览 §5.2 拆分扩展） | 文档系统落地 | — |
 | 2026-08-21 | 补充 §7 测试注入 `g_mock_fetch_range_cap` 及 §9 部分 refill 测试引用 | 覆盖 FetchRange 部分返回 | — |
+| 2026-08-26 | §3.1 Bucket 缓存行布局：`span_list_lock` 成员级 `alignas(64)` 隔离双锁，static_assert 固化不变量 | 消除桶内双锁伪共享（C-01 复查） | — |
+| 2026-08-26 | §5 新增 `CalculateTotalTransferPtrs`：提取 TransferCache 总指针容量计算 | 消除 InitTransferCache/Reset 重复循环 | — |
