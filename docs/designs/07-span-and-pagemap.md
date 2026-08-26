@@ -31,7 +31,8 @@ Span 描述一段连续页区间及其对象分配状态，是 PageCache 切分/
 | `Span::start_page_idx/page_num` | 起始页号 / 页数 | 同上 |
 | `Span::flags` | `kUsedMask`/`kCommittedMask` 打包位 | 经 `IsUsed/SetUsed/IsCommitted/SetCommitted` 访问 |
 | `Span::size_class_idx` | CentralCache 桶索引 | 释放时避免重映射尺寸 |
-| `Span::aligned_obj_size/capacity/use_count` | 对象分配元数据 | CentralCache 桶锁下访问 |
+| `Span::aligned_obj_size/capacity` | 对象尺寸 / 最大槽数 | CentralCache 桶锁下访问 |
+| `Span::use_count` | 不在 Span bitmap 中的对象数（含用户持有、ThreadCache/TransferCache/临时批次） | 仅随 bitmap 位变化；`== 0` 表示无任何缓存持有对象，是返还 PageCache 的所有权门禁 |
 | `Span::scan_cursor` | 首个可能含空闲位的 bitmap 字 | 减少分配扫描范围 |
 | `Span::obj_offset/owner_shard_id` | 数据区偏移 / 属主分片 | 初始化后不可变 |
 | `Span::last_used_time_ms` | 最近归还时间戳（冷数据） | Scavenger 读取 |
@@ -73,6 +74,7 @@ bitmap 放页区起始（1 bit/对象），数据区按 ALIGNMENT 对齐其后�
 
 - 分配：从 `scan_cursor` 起扫描 `BITMAP_BITS` 位字，`std::countr_zero` 取首个空闲位；字满则推进游标。
 - 释放：按对象偏移反算全局索引（2 的幂尺寸走移位），置位并回退 `scan_cursor`；double-free 触发 `AM_HCHECK`。
+- `use_count` 只随 bitmap 位变化：`AllocObject` 清位时递增、`FreeObject` 置位时递减；对象在用户 / ThreadCache / TransferCache / 临时批次间流转均不改变它（`am_free` 只入 ThreadCache，TransferCache 吸收不调 `FreeObject`）。`use_count == 0` 即全部对象已回 bitmap，CentralCache 据此将 descriptor 返还 PageCache。
 
 ### 6.3 PageMap 查询（48-bit 模式）
 
@@ -108,3 +110,4 @@ i1/i2/i3 各取 9 bit；逐层 acquire load，任一空层返回 null。
 | 日期 | 变更 | 原因 | 关联 PR / ADR |
 |---|---|---|---|
 | 2026-08-19 | 初版（由架构总览 §4/§5.3/§5.6 拆分扩展） | 文档系统落地 | — |
+| 2026-08-26 | 明确 `use_count` 为 bitmap 外对象数及归还门禁语义 | span.h 注释与 improvement-plan 04 语义对齐 | — |

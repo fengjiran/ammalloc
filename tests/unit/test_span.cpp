@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <gtest/gtest.h>
 #include <limits>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -255,7 +256,7 @@ TEST(SpanTest, SpanList_PushBackAndEraseMiddle) {
 
     Span* after = list.erase(&b);
     EXPECT_EQ(after, &c);
-    EXPECT_EQ(list.begin(), &a);
+    EXPECT_EQ(&*list.begin(), &a);
     EXPECT_EQ(a.next, &c);
     EXPECT_EQ(c.prev, &a);
 
@@ -269,6 +270,75 @@ TEST(SpanTest, SpanList_EmptyPopFrontReturnsNull) {
 
     EXPECT_TRUE(list.empty());
     EXPECT_EQ(list.pop_front(), nullptr);
+}
+
+// Compile-time const-correctness contract: every mutator stays callable on
+// mutable lists only, and const accessors never hand out mutable node pointers.
+template<typename T, typename = void>
+struct CanMutateSpanList : std::false_type {};
+template<typename T>
+struct CanMutateSpanList<
+        T, std::void_t<decltype(std::declval<T&>().push_front(std::declval<Span*>())),
+                       decltype(std::declval<T&>().push_back(std::declval<Span*>())),
+                       decltype(std::declval<T&>().erase(std::declval<Span*>())),
+                       decltype(std::declval<T&>().pop_front())>> : std::true_type {};
+
+static_assert(CanMutateSpanList<SpanList>::value,
+              "mutable SpanList must expose every mutator");
+static_assert(!CanMutateSpanList<const SpanList>::value,
+              "const SpanList must reject every mutator");
+static_assert(std::is_same_v<decltype(std::declval<SpanList&>().begin()),
+                             SpanList::Iterator>,
+              "mutable begin() must return Iterator");
+static_assert(std::is_same_v<decltype(std::declval<const SpanList&>().begin()),
+                             SpanList::ConstIterator>,
+              "const begin() must return ConstIterator");
+static_assert(std::is_same_v<decltype(std::declval<SpanList&>().end()),
+                             SpanList::Iterator>,
+              "mutable end() must return Iterator");
+static_assert(std::is_same_v<decltype(std::declval<const SpanList&>().end()),
+                             SpanList::ConstIterator>,
+              "const end() must return ConstIterator");
+static_assert(std::is_same_v<SpanList::Iterator::reference, Span&>,
+              "Iterator dereferences to Span&");
+static_assert(std::is_same_v<SpanList::ConstIterator::reference, const Span&>,
+              "ConstIterator dereferences to const Span&");
+static_assert(!std::is_convertible_v<SpanList::ConstIterator, SpanList::Iterator>,
+              "ConstIterator must never degrade to mutable Iterator");
+
+TEST(SpanTest, SpanList_RangeForOrder) {
+    SpanList list;
+    Span a, b;
+    list.push_front(&a);
+    list.push_front(&b);
+
+    std::vector<Span*> seen;
+    for (Span& span: list) {
+        seen.push_back(&span);
+    }
+
+    EXPECT_EQ(seen.size(), 2u);
+    EXPECT_EQ(seen[0], &b);
+    EXPECT_EQ(seen[1], &a);
+}
+
+TEST(SpanTest, SpanList_ConstRangeForTraversal) {
+    SpanList list;
+    Span a, b;
+    list.push_front(&a);
+    list.push_front(&b);
+
+    const SpanList& const_list = list;
+    std::vector<const Span*> seen;
+    for (const Span& span: const_list) {
+        seen.push_back(&span);
+    }
+
+    EXPECT_EQ(seen.size(), 2u);
+    EXPECT_EQ(seen[0], &b);
+    EXPECT_EQ(seen[1], &a);
+    EXPECT_FALSE(const_list.empty());
+    EXPECT_EQ(&*const_list.begin(), &b);
 }
 
 TEST(SpanTest, FreeObjectUnderflowDeath) {
