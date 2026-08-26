@@ -11,7 +11,7 @@
 #include "ammalloc/spin_lock.h"
 
 #include <atomic>
-#include <cstddef>// offsetof in the Bucket layout static_asserts below
+#include <cstddef>
 #include <mutex>
 
 namespace ammalloc {

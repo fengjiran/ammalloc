@@ -34,7 +34,7 @@ struct alignas(SystemConfig::CACHE_LINE_SIZE) Span {
     // Object allocation metadata (valid when used by CentralCache).
     uint32_t aligned_obj_size{0};
     uint32_t capacity{0};   // Maximum objects stored in this Span.
-    uint32_t use_count{0};  // Objects currently allocated from this Span.
+    uint32_t use_count{0};  // Objects currently absent from the Span bitmap (incl. user/caches).
     uint32_t scan_cursor{0};// First bitmap word that may contain a free bit.
 
     // Calculated data offset (avoids storing full pointer).
@@ -142,6 +142,94 @@ static_assert(alignof(Span) == SystemConfig::CACHE_LINE_SIZE,
 /// sentinel removes null branches from insertion and removal.
 class alignas(SystemConfig::CACHE_LINE_SIZE) SpanList {
 public:
+    /// @brief Forward iterator following the intrusive `next` links.
+    ///        Invalidated when its node is erased from the list.
+    class Iterator {
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = Span;
+        using difference_type = std::ptrdiff_t;
+        using pointer = Span*;
+        using reference = Span&;
+
+        Iterator() = default;
+        explicit Iterator(Span* node) noexcept : node_(node) {}
+
+        reference operator*() const noexcept {
+            return *node_;
+        }
+
+        pointer operator->() const noexcept {
+            return node_;
+        }
+
+        Iterator& operator++() noexcept {
+            node_ = node_->next;
+            return *this;
+        }
+
+        Iterator operator++(int) noexcept {
+            Iterator tmp = *this;
+            ++*this;
+            return tmp;
+        }
+
+        friend bool operator==(const Iterator& a, const Iterator& b) noexcept {
+            return a.node_ == b.node_;
+        }
+
+        friend bool operator!=(const Iterator& a, const Iterator& b) noexcept {
+            return a.node_ != b.node_;
+        }
+
+    private:
+        Span* node_{nullptr};
+    };
+
+    /// @brief Read-only forward iterator following the intrusive `next` links.
+    ///        Invalidated when its node is erased from the list.
+    class ConstIterator {
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = const Span;
+        using difference_type = std::ptrdiff_t;
+        using pointer = const Span*;
+        using reference = const Span&;
+
+        ConstIterator() = default;
+        explicit ConstIterator(const Span* node) noexcept : node_(node) {}
+
+        reference operator*() const noexcept {
+            return *node_;
+        }
+
+        pointer operator->() const noexcept {
+            return node_;
+        }
+
+        ConstIterator& operator++() noexcept {
+            node_ = node_->next;
+            return *this;
+        }
+
+        ConstIterator operator++(int) noexcept {
+            ConstIterator tmp = *this;
+            ++*this;
+            return tmp;
+        }
+
+        friend bool operator==(const ConstIterator& a, const ConstIterator& b) noexcept {
+            return a.node_ == b.node_;
+        }
+        
+        friend bool operator!=(const ConstIterator& a, const ConstIterator& b) noexcept {
+            return a.node_ != b.node_;
+        }
+
+    private:
+        const Span* node_{nullptr};
+    };
+
     /// @brief Constructs an empty circular list.
     SpanList() noexcept {
         head_.next = &head_;
@@ -151,16 +239,28 @@ public:
     SpanList(const SpanList&) = delete;
     SpanList& operator=(const SpanList&) = delete;
 
-    /// @brief Returns the first node.
-    /// @return First Span, or `end()` when empty.
-    AM_NODISCARD Span* begin() const noexcept {
-        return head_.next;
+    /// @brief Returns an iterator to the first node.
+    /// @return Iterator to the first Span, or `end()` when empty.
+    AM_NODISCARD Iterator begin() noexcept {
+        return Iterator(head_.next);
     }
 
-    /// @brief Returns the circular sentinel.
-    /// @return End sentinel; it is not an allocatable Span.
-    AM_NODISCARD Span* end() noexcept {
-        return &head_;
+    /// @brief Returns a read-only iterator to the first node.
+    /// @return ConstIterator to the first Span, or `end()` when empty.
+    AM_NODISCARD ConstIterator begin() const noexcept {
+        return ConstIterator(head_.next);
+    }
+
+    /// @brief Returns the circular sentinel iterator.
+    /// @return Iterator to the sentinel; it is not an allocatable Span.
+    AM_NODISCARD Iterator end() noexcept {
+        return Iterator(&head_);
+    }
+
+    /// @brief Returns the circular sentinel iterator for read-only traversal.
+    /// @return ConstIterator to the sentinel; it is not an allocatable Span.
+    AM_NODISCARD ConstIterator end() const noexcept {
+        return ConstIterator(&head_);
     }
 
     /// @brief Reports whether the list has no nodes.
@@ -184,21 +284,21 @@ public:
 
     /// @brief Inserts a Span at the front of the list.
     /// @param span Unlinked Span to insert.
-    void push_front(Span* span) const noexcept {
-        insert(begin(), span);
+    void push_front(Span* span) noexcept {
+        insert(&*begin(), span);
     }
 
     /// @brief Inserts a Span at the back of the list.
     /// @param span Unlinked Span to insert.
     void push_back(Span* span) noexcept {
-        insert(end(), span);
+        insert(&*end(), span);
     }
 
     /// @brief Unlinks a Span without destroying its metadata.
     /// @param span Linked Span to remove.
     /// @return Node following the removed Span, possibly `end()`.
     /// @pre The lock protecting this list is held.
-    Span* erase(Span* span) const noexcept {
+    Span* erase(Span* span) noexcept {
         AM_DCHECK(span != nullptr && span != &head_);
         auto* prev = span->prev;
         auto* next = span->next;
@@ -211,7 +311,7 @@ public:
 
     /// @brief Removes the first Span without destroying its metadata.
     /// @return Removed Span, or null when the list is empty.
-    AM_NODISCARD Span* pop_front() const noexcept {
+    AM_NODISCARD Span* pop_front() noexcept {
         // clang-format off
         if (empty()) AM_UNLIKELY {
             return nullptr;
