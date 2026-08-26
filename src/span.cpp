@@ -4,7 +4,8 @@
 namespace ammalloc {
 
 void Span::Init(size_t aligned_object_size) {
-    AM_DCHECK(aligned_object_size > 0 && aligned_object_size <= std::numeric_limits<uint32_t>::max());
+    AM_HCHECK(aligned_object_size > 0 &&
+              aligned_object_size <= std::numeric_limits<uint32_t>::max());
     aligned_obj_size = static_cast<uint32_t>(aligned_object_size);
     size_class_idx = SizeClass::Index(aligned_obj_size);
     void* start_ptr = detail::PageIDToPtr(start_page_idx);
@@ -12,11 +13,12 @@ void Span::Init(size_t aligned_object_size) {
 
     // Estimate bitmap + data layout:
     // Total = BitmapBytes(1 bit per object) + DataBytes(obj_size per object)
-    size_t max_objs = (total_bytes * 8) / (aligned_obj_size * 8 + 1);
-    size_t bitmap_num = (max_objs + 64 - 1) >> 6;
+    size_t max_objs = (total_bytes * SystemConfig::BITS_PER_BYTE) /
+                      (aligned_obj_size * SystemConfig::BITS_PER_BYTE + 1);
+    size_t bitmap_num = (max_objs + SystemConfig::BITMAP_MASK) >> SystemConfig::BITMAP_SHIFT;
     auto* bitmap = new (start_ptr) uint64_t[bitmap_num];
 
-    uintptr_t data_start = reinterpret_cast<uintptr_t>(bitmap) + bitmap_num * 8;
+    uintptr_t data_start = reinterpret_cast<uintptr_t>(bitmap) + bitmap_num * sizeof(uint64_t);
     data_start = detail::AlignUp(data_start, SystemConfig::ALIGNMENT);
     obj_offset = static_cast<uint32_t>(data_start - reinterpret_cast<uintptr_t>(start_ptr));
 
@@ -25,8 +27,8 @@ void Span::Init(size_t aligned_object_size) {
     capacity = data_start >= data_end ? 0 : (data_end - data_start) / aligned_obj_size;
 
     // Initialize bitmap: set first 'capacity' bits to 1 (free).
-    size_t full_bitmap_num = capacity / 64;
-    size_t tail_bits = capacity & 63;
+    size_t full_bitmap_num = capacity >> SystemConfig::BITMAP_SHIFT;
+    size_t tail_bits = capacity & SystemConfig::BITMAP_MASK;
     for (size_t i = 0; i < full_bitmap_num; ++i) {
         bitmap[i] = ~0ULL;
     }
@@ -62,7 +64,7 @@ void* Span::AllocObject() {
         ++use_count;
         scan_cursor = val == 0 ? static_cast<uint32_t>(i + 1) : static_cast<uint32_t>(i);
 
-        size_t global_obj_idx = i * 64 + bit_pos;
+        size_t global_obj_idx = i * SystemConfig::BITMAP_BITS + bit_pos;
         return static_cast<char*>(GetDataBasePtr()) + global_obj_idx * aligned_obj_size;
     }
     return nullptr;
@@ -88,9 +90,9 @@ void Span::FreeObject(void* ptr) {
     // clang-format on
 
     AM_HCHECK(global_obj_idx < capacity, "Pointer overflow detected!");
-    auto bitmap_idx = static_cast<uint32_t>(global_obj_idx >> 6);
+    auto bitmap_idx = static_cast<uint32_t>(global_obj_idx >> SystemConfig::BITMAP_SHIFT);
     AM_HCHECK(bitmap_idx < GetBitmapNum());
-    int bit_pos = static_cast<int>(global_obj_idx & 63);
+    int bit_pos = static_cast<int>(global_obj_idx & SystemConfig::BITMAP_MASK);
     uint64_t mask = 1ull << bit_pos;
     auto* bitmap = GetBitmap();
     AM_HCHECK((bitmap[bitmap_idx] & mask) == 0, "double free detected.");

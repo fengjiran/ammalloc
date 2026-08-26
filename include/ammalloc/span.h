@@ -93,7 +93,7 @@ struct alignas(SystemConfig::CACHE_LINE_SIZE) Span {
     /// @brief Returns the number of bitmap words required by `capacity` objects.
     /// @return Bitmap length in 64-bit words.
     AM_NODISCARD AM_ALWAYS_INLINE size_t GetBitmapNum() const noexcept {
-        return (capacity + 63) >> 6;
+        return (capacity + SystemConfig::BITMAP_MASK) >> SystemConfig::BITMAP_SHIFT;
     }
 
     /// @brief Returns the first object slot after bitmap and alignment padding.
@@ -128,8 +128,12 @@ struct alignas(SystemConfig::CACHE_LINE_SIZE) Span {
     AM_NODISCARD size_t ObjectSlotOf(void* ptr) const noexcept;
 };
 
-static_assert(sizeof(Span) == SystemConfig::CACHE_LINE_SIZE, "Span must be exactly 64 bytes");
-static_assert(alignof(Span) == SystemConfig::CACHE_LINE_SIZE, "Span alignment mismatch");
+// The message stays literal: static_assert requires a string literal, so it
+// describes the invariant instead of hardcoding CACHE_LINE_SIZE's value.
+static_assert(sizeof(Span) == SystemConfig::CACHE_LINE_SIZE,
+              "Span must fit exactly one cache line");
+static_assert(alignof(Span) == SystemConfig::CACHE_LINE_SIZE,
+              "Span alignment mismatch");
 
 /// @brief Maintains an allocation-free doubly linked list with a circular sentinel.
 ///

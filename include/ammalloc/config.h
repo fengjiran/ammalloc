@@ -6,7 +6,9 @@
 
 #include "ammalloc/attributes.h"
 
+#include <bit>
 #include <cstddef>
+#include <limits>
 #include <new>
 
 namespace ammalloc {
@@ -18,6 +20,11 @@ struct SystemConfig {
     constexpr static size_t HUGE_PAGE_SIZE = 2 * 1024 * 1024;
     constexpr static size_t CACHE_LINE_SIZE = 64;
     constexpr static size_t BITMAP_BITS = 64;
+    /// @brief Bitmap word geometry, derived from BITMAP_BITS.
+    constexpr static size_t BITMAP_SHIFT = std::countr_zero(BITMAP_BITS);
+    constexpr static size_t BITMAP_MASK = BITMAP_BITS - 1;
+    /// @brief Bits per byte, from the ABI rather than a magic 8.
+    constexpr static size_t BITS_PER_BYTE = std::numeric_limits<unsigned char>::digits;
     /// @brief Fundamental alignment guaranteed for every allocated object.
     ///
     /// Tied to the platform ABI via `alignof(std::max_align_t)` (16 on
