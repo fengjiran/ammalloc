@@ -29,20 +29,19 @@ protected:
 
     AM_NODISCARD size_t GetBucketSize(size_t page_num) const {
         size_t cnt = 0;
-        auto* cur = cache_.GetSpanList(page_num).begin();
-        while (cur != cache_.GetSpanList(page_num).end()) {
+        for (auto it = cache_.GetSpanList(page_num).begin();
+             it != cache_.GetSpanList(page_num).end(); ++it) {
             ++cnt;
-            cur = cur->next;
         }
         return cnt;
     }
 
     AM_NODISCARD Span* GetBucketFrontOrNull(size_t page_num) {
-        auto* first = cache_.GetSpanList(page_num).begin();
-        if (first == cache_.GetSpanList(page_num).end()) {
+        auto it = cache_.GetSpanList(page_num).begin();
+        if (it == cache_.GetSpanList(page_num).end()) {
             return nullptr;
         }
-        return first;
+        return &*it;
     }
 };
 

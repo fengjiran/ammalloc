@@ -55,18 +55,18 @@ void PageHeapScavenger::ScavengeOnePass() {
         auto& span_list = page_cache.GetSpanList(i);
         {
             std::lock_guard<std::mutex> lock(page_cache.GetMutex());
-            auto* cur = span_list.begin();
-            while (cur != span_list.end()) {
-                auto* next = cur->next;
+            auto it = span_list.begin();
+            while (it != span_list.end()) {
+                Span* cur = &*it;
+                // Advance before erase() detaches cur->next.
+                ++it;
                 if (cur->IsUsed()) {
                     spdlog::error("Scavenger: used span {} in free list.",
                                   static_cast<void*>(cur));
-                    cur = next;
                     continue;
                 }
 
                 if (!cur->IsCommitted()) {
-                    cur = next;
                     continue;
                 }
 
@@ -84,7 +84,6 @@ void PageHeapScavenger::ScavengeOnePass() {
                         tail->next = nullptr;
                     }
                 }
-                cur = next;
             }
         }
 

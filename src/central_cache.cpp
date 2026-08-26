@@ -70,7 +70,7 @@ size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num, size_t a
                 }
             }
 
-            auto* span = bucket.span_list.begin();
+            Span* span = &*bucket.span_list.begin();
             while (total_extracted < total_to_extract) {
                 void* obj = span->AllocObject();
                 if (!obj) {
@@ -243,14 +243,14 @@ void CentralCache::Reset() noexcept {
 size_t CentralCache::CalculateTotalTransferPtrs() noexcept {
     size_t total_ptrs = 0;
     for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
-        size_t batch_num = SizeClass::CalculateBatchSize(SizeClass::Size(i));
+        auto batch_num = SizeClass::CalculateBatchSize(SizeClass::Size(i));
         total_ptrs += kCapScale * batch_num;
     }
     return total_ptrs;
 }
 
 void CentralCache::InitTransferCache() {
-    size_t total_ptrs = CalculateTotalTransferPtrs();
+    auto total_ptrs = CalculateTotalTransferPtrs();
 
     // One PageAllocator mapping avoids recursive am_malloc entry and per-bucket VMAs.
     size_t total_bytes = total_ptrs * sizeof(void*);
