@@ -63,7 +63,7 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 | `FetchRange` | `size_t FetchRange(FreeList&, size_t batch_num, size_t aligned_size)` | `@pre batch_num <= kMaxBatchSize`；先 TransferCache 后 SpanList；返回可能小于请求（OOM 或 Span 不足） | ✅（跨层必经） |
 | `ReleaseListToSpans` | `void ReleaseListToSpans(void* start, size_t aligned_size)` | `@pre` 链上对象同属一个 `aligned_size` 的 Span；先吸收入 TransferCache，溢出按 bitmap 归还 | ✅ |
 | `Reset` | `void Reset() noexcept` | 测试/受控 teardown：还原 bitmap、归还 Span、释放 backing | ❌ |
-| `GetOneSpan` | `static Span* (Bucket&, size_t, std::unique_lock&)` | 私有；持有桶锁进入，PageCache 期间释放 | ❌ |
+| `GetOneSpan` | `static Span* (Bucket&, size_t, std::unique_lock&)` | 私有；持有桶锁进入，PageCache 期间释放，返回前无论成败均重新持锁 | ❌ |
 | `InitTransferCache` | `void InitTransferCache()` | 私有；构造期单次 SystemAlloc | ❌ |
 | `CalculateTotalTransferPtrs` | `static size_t () noexcept` | 私有；TransferCache 总指针容量单一来源，分配与释放共用 | ❌ |
 
@@ -115,3 +115,4 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 | 2026-08-21 | 补充 §7 测试注入 `g_mock_fetch_range_cap` 及 §9 部分 refill 测试引用 | 覆盖 FetchRange 部分返回 | — |
 | 2026-08-26 | §3.1 Bucket 缓存行布局：`span_list_lock` 成员级 `alignas(64)` 隔离双锁，static_assert 固化不变量 | 消除桶内双锁伪共享（C-01 复查） | — |
 | 2026-08-26 | §5 新增 `CalculateTotalTransferPtrs`：提取 TransferCache 总指针容量计算 | 消除 InitTransferCache/Reset 重复循环 | — |
+| 2026-08-26 | §5 `GetOneSpan` 锁协议自洽：失败路径亦重新持锁返回 | 调用点无需处理锁恢复，消除隐藏约定 | — |
