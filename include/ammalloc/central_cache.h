@@ -112,7 +112,8 @@ private:
     /// @param bucket Bucket that receives the Span.
     /// @param aligned_size Object size used to initialize Span metadata.
     /// @param lock Held lock for `bucket.span_list_lock`; temporarily released
-    ///        while entering PageCache and reacquired before insertion.
+    ///        while entering PageCache, reacquired before returning on both
+    ///        success and failure.
     /// @return Borrowed Span owned by PageCache, or null on allocation failure.
     /// @pre `lock` owns `bucket.span_list_lock`.
     static Span* GetOneSpan(Bucket& bucket, size_t aligned_size,

@@ -51,47 +51,46 @@ size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num, size_t a
         // Prefetch one additional batch to amortize the SpanList lock for the
         // next requester.
         // TODO(ammalloc): Bound prefetching by the observed TransferCache capacity.
-        size_t prefetch_target = batch_num;
-        size_t total_to_extract = need_for_thread + prefetch_target;
+        const size_t extract_target = need_for_thread + batch_num;
         void* prefetch_ptrs[SizeClass::kMaxBatchSize];
         size_t actual_prefetched = 0;
-        size_t total_extracted = 0;
+        size_t extracted = 0;
 
         std::unique_lock<std::mutex> lock(bucket.span_list_lock);
-        while (total_extracted < total_to_extract) {
-            if (bucket.span_list.empty() ||
-                bucket.span_list.begin()->use_count >= bucket.span_list.begin()->capacity) {
+        auto& cur_span_list = bucket.span_list;
+        auto begin = cur_span_list.begin();
+        while (extracted < extract_target) {
+            if (cur_span_list.empty() || begin->use_count >= begin->capacity) {
                 if (!GetOneSpan(bucket, aligned_size, lock)) {
-                    // GetOneSpan releases the lock before calling PageCache and
-                    // leaves it unlocked on failure; reacquire so the unique_lock
-                    // destructor/unlock below cannot throw on an unlocked mutex.
-                    lock.lock();
                     break;
                 }
+                // GetOneSpan pushed a fresh Span to the front; refresh the
+                // head iterator before allocating from it.
+                begin = cur_span_list.begin();
             }
 
-            Span* span = &*bucket.span_list.begin();
-            while (total_extracted < total_to_extract) {
-                void* obj = span->AllocObject();
+            while (extracted < extract_target) {
+                void* obj = begin->AllocObject();
                 if (!obj) {
                     // Keep full Spans behind candidates that still have free bits.
-                    bucket.span_list.erase(span);
-                    bucket.span_list.push_back(span);
+                    cur_span_list.erase(begin);
+                    cur_span_list.push_back(&*begin);
                     break;
                 }
 
-                if (total_extracted < need_for_thread) {
+                if (extracted < need_for_thread) {
                     auto* node = static_cast<FreeBlock*>(obj);
                     if (!head) {
                         tail = obj;
                     }
+
                     node->next = static_cast<FreeBlock*>(head);
                     head = node;
                     ++fetched;
                 } else {
                     prefetch_ptrs[actual_prefetched++] = obj;
                 }
-                ++total_extracted;
+                ++extracted;
             }
         }
         // Publish prefetched pointers only after leaving the Span bitmap lock domain.
@@ -276,6 +275,9 @@ Span* CentralCache::GetOneSpan(Bucket& bucket, size_t aligned_size,
     auto page_num = SizeClass::GetMovePageNum(aligned_size);
     auto* span = PageCache::GetInstance().AllocSpan(page_num);
     if (!span) {
+        // Restore the lock before returning: the caller relies on holding it
+        // on both success and failure.
+        lock.lock();
         return nullptr;
     }
 
