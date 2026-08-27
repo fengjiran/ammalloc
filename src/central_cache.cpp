@@ -131,7 +131,7 @@ size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num, size_t a
 }
 
 void CentralCache::ReleaseListToSpans(void* start, size_t aligned_size) {
-    auto idx = SizeClass::Index(aligned_size);
+    const auto idx = SizeClass::Index(aligned_size);
     auto& bucket = buckets_[idx];
     void* cur = start;
 
@@ -153,6 +153,12 @@ void CentralCache::ReleaseListToSpans(void* start, size_t aligned_size) {
         bucket.transfer_cache_lock.unlock();
 
         if (pushed < local_count) {
+            // Spans that reach use_count == 0 are collected into an intrusive
+            // list and released to PageCache only after dropping the bucket
+            // lock: one unlock per batch instead of one per empty Span, and no
+            // PageCache entry while holding a CentralCache mutex (which would
+            // invert the allocator lock order).
+            Span* empty_span_head = nullptr;
             std::unique_lock<std::mutex> lock(bucket.span_list_lock);
             for (size_t i = pushed; i < local_count; ++i) {
                 void* obj = local_ptrs[i];
@@ -162,20 +168,28 @@ void CentralCache::ReleaseListToSpans(void* start, size_t aligned_size) {
                 }
 
                 span->FreeObject(obj);
-                // Make a newly non-full Span the next allocation candidate.
-                if (span->use_count == span->capacity - 1) {
+                // Empty and newly-non-full are mutually exclusive except for
+                // capacity-1 spans where both would match; an empty span leaves
+                // the bucket entirely, so only non-empty candidates need front
+                // placement.
+                if (span->use_count == 0) {
+                    bucket.span_list.erase(span);
+                    // Reuse the intrusive link for the release collection so
+                    // batching cannot recurse through an STL allocation.
+                    span->next = empty_span_head;
+                    empty_span_head = span;
+                } else if (span->use_count == span->capacity - 1) {
+                    // Make a newly non-full Span the next allocation candidate.
                     bucket.span_list.erase(span);
                     bucket.span_list.push_front(span);
                 }
+            }
+            lock.unlock();
 
-                if (span->use_count == 0) {
-                    bucket.span_list.erase(span);
-                    // Never enter PageCache while holding a CentralCache bucket
-                    // mutex; doing so would invert the allocator lock order.
-                    lock.unlock();
-                    PageCache::GetInstance().ReleaseSpan(span);
-                    lock.lock();
-                }
+            while (empty_span_head) {
+                auto* next_span = empty_span_head->next;
+                PageCache::GetInstance().ReleaseSpan(empty_span_head);
+                empty_span_head = next_span;
             }
         }
     }
@@ -239,6 +253,13 @@ void CentralCache::Reset() noexcept {
             bucket.transfer_cache_count = 0;
         }
     }
+
+    // Rebuild the backing so the singleton keeps its O(1) fast path after
+    // Reset; an OOM here degrades gracefully to the SpanList slow path.
+    if (!TryInitTransferCache()) {
+        spdlog::warn("CentralCache Reset could not renew TransferCaches; "
+                     "continuing without the fast path.");
+    }
 }
 
 size_t CentralCache::CalculateTotalTransferPtrs() noexcept {
@@ -250,16 +271,15 @@ size_t CentralCache::CalculateTotalTransferPtrs() noexcept {
     return total_ptrs;
 }
 
-void CentralCache::InitTransferCache() {
-    auto total_ptrs = CalculateTotalTransferPtrs();
+bool CentralCache::TryInitTransferCache() noexcept {
+    const auto total_ptrs = CalculateTotalTransferPtrs();
 
     // One PageAllocator mapping avoids recursive am_malloc entry and per-bucket VMAs.
     size_t total_bytes = total_ptrs * sizeof(void*);
     size_t page_num = (total_bytes + SystemConfig::PAGE_SIZE - 1) >> SystemConfig::PAGE_SHIFT;
     void* p = PageAllocator::SystemAlloc(page_num);
     if (!p) {
-        spdlog::critical("CentralCache failed to allocate memory for TransferCaches!");
-        std::abort();
+        return false;
     }
 
     auto** cur_ptr = static_cast<void**>(p);
@@ -268,6 +288,14 @@ void CentralCache::InitTransferCache() {
         buckets_[i].transfer_cache_capacity = batch_num * kCapScale;
         buckets_[i].transfer_cache = cur_ptr;
         cur_ptr += buckets_[i].transfer_cache_capacity;
+    }
+    return true;
+}
+
+void CentralCache::InitTransferCache() {
+    if (!TryInitTransferCache()) {
+        spdlog::critical("CentralCache failed to allocate memory for TransferCaches!");
+        std::abort();
     }
 }
 

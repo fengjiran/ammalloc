@@ -90,8 +90,10 @@ public:
     /// @pre Each object belongs to an ammalloc Span for `aligned_size`.
     void ReleaseListToSpans(void* start, size_t aligned_size);
 
-    /// @brief Releases cached objects, spans, and TransferCache backing storage.
-    /// @note Intended for tests or controlled teardown after concurrent use stops.
+    /// @brief Releases cached objects and spans, then rebuilds the TransferCache
+    ///        backing so the singleton keeps its O(1) fast path afterwards.
+    /// @note Intended for tests or controlled teardown after concurrent use stops
+    ///       and every ThreadCache has drained via `ReleaseAll`.
     void Reset() noexcept;
 
 private:
@@ -101,7 +103,14 @@ private:
 
     /// @brief Allocates and partitions contiguous backing storage for all TransferCaches.
     /// @note Uses PageAllocator directly to prevent recursive `am_malloc` entry.
+    ///       Aborts on failure: constructor-time OOM leaves the allocator unusable.
     void InitTransferCache();
+
+    /// @brief (Re)allocates TransferCache backing without aborting.
+    /// @return True when the backing is ready; on failure every bucket slice
+    ///         stays zeroed and callers degrade to the SpanList slow path.
+    /// @note Shared by InitTransferCache (aborting wrapper) and Reset (rebuild).
+    bool TryInitTransferCache() noexcept;
 
     /// @brief Returns the total pointer capacity of all TransferCache buckets.
     /// @note Single source of truth for the contiguous backing size; shared by
