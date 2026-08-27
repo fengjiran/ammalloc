@@ -101,7 +101,8 @@ size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num, size_t a
             bucket.transfer_cache_lock.lock();
             while (successfully_pushed < actual_prefetched &&
                    bucket.transfer_cache_count < bucket.transfer_cache_capacity) {
-                bucket.transfer_cache[bucket.transfer_cache_count++] = prefetch_ptrs[successfully_pushed++];
+                bucket.transfer_cache[bucket.transfer_cache_count++] =
+                        prefetch_ptrs[successfully_pushed++];
             }
             bucket.transfer_cache_lock.unlock();
 
@@ -145,7 +146,8 @@ void CentralCache::ReleaseListToSpans(void* start, size_t aligned_size) {
         // Absorb the batch without touching Span metadata when capacity permits.
         size_t pushed = 0;
         bucket.transfer_cache_lock.lock();
-        while (pushed < local_count && bucket.transfer_cache_count < bucket.transfer_cache_capacity) {
+        while (pushed < local_count &&
+               bucket.transfer_cache_count < bucket.transfer_cache_capacity) {
             bucket.transfer_cache[bucket.transfer_cache_count++] = local_ptrs[pushed++];
         }
         bucket.transfer_cache_lock.unlock();
