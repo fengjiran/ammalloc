@@ -309,6 +309,17 @@ public:
         return next;
     }
 
+    /// @brief Unlinks the Span addressed by an iterator without destroying its
+    ///        metadata, then advances to the next node.
+    /// @param pos Iterator to the Span to remove.
+    /// @return Iterator to the node following the removed Span, possibly
+    ///         `end()`. Invalidates only the erased position.
+    /// @pre The lock protecting this list is held.
+    /// @pre `pos` dereferences to a linked Span (not default-constructed).
+    Iterator erase(Iterator pos) noexcept {
+        return Iterator(erase(&*pos));
+    }
+
     /// @brief Removes the first Span without destroying its metadata.
     /// @return Removed Span, or null when the list is empty.
     AM_NODISCARD Span* pop_front() noexcept {

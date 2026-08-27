@@ -58,20 +58,22 @@ void PageHeapScavenger::ScavengeOnePass() {
             auto it = span_list.begin();
             while (it != span_list.end()) {
                 Span* cur = &*it;
-                // Advance before erase() detaches cur->next.
-                ++it;
                 if (cur->IsUsed()) {
                     spdlog::error("Scavenger: used span {} in free list.",
                                   static_cast<void*>(cur));
+                    ++it;
                     continue;
                 }
 
                 if (!cur->IsCommitted()) {
+                    ++it;
                     continue;
                 }
 
                 if (now - cur->last_used_time_ms >= kIdleThresholdMs) {
-                    span_list.erase(cur);
+                    // erase() returns the next position, so iteration can
+                    // continue without touching the detached node's links.
+                    it = span_list.erase(it);
                     // Reserve the detached Span so release/coalescing cannot claim it.
                     cur->SetUsed(true);
 
@@ -83,7 +85,9 @@ void PageHeapScavenger::ScavengeOnePass() {
                         tail = cur;
                         tail->next = nullptr;
                     }
+                    continue;
                 }
+                ++it;
             }
         }
 

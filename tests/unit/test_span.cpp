@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <limits>
 #include <type_traits>
 #include <vector>
@@ -305,6 +306,10 @@ static_assert(std::is_same_v<SpanList::ConstIterator::reference, const Span&>,
               "ConstIterator dereferences to const Span&");
 static_assert(!std::is_convertible_v<SpanList::ConstIterator, SpanList::Iterator>,
               "ConstIterator must never degrade to mutable Iterator");
+static_assert(std::forward_iterator<SpanList::Iterator>,
+              "Iterator must satisfy std::forward_iterator");
+static_assert(std::forward_iterator<SpanList::ConstIterator>,
+              "ConstIterator must satisfy std::forward_iterator");
 
 TEST(SpanTest, SpanList_RangeForOrder) {
     SpanList list;
@@ -339,6 +344,73 @@ TEST(SpanTest, SpanList_ConstRangeForTraversal) {
     EXPECT_EQ(seen[1], &a);
     EXPECT_FALSE(const_list.empty());
     EXPECT_EQ(&*const_list.begin(), &b);
+}
+
+TEST(SpanTest, SpanList_EraseByIterator) {
+    SpanList list;
+    Span a, b, c;
+    list.push_back(&a);
+    list.push_back(&b);
+    list.push_back(&c);
+
+    // Advance to the middle node (&b), then erase it through the iterator.
+    auto it = list.begin();
+    ++it;
+    auto next = list.erase(it);
+
+    EXPECT_EQ(&*next, &c);
+    EXPECT_EQ(&*list.begin(), &a);
+    EXPECT_EQ(a.next, &c);
+    EXPECT_EQ(c.prev, &a);
+    EXPECT_EQ(b.next, nullptr);
+    EXPECT_EQ(b.prev, nullptr);
+}
+
+// Standard `it = erase(it)` pattern while iterating: every other node is
+// removed without skipping or revisiting any node.
+TEST(SpanTest, SpanList_EraseWhileIterating) {
+    SpanList list;
+    Span a, b, c, d;
+    list.push_back(&a);
+    list.push_back(&b);
+    list.push_back(&c);
+    list.push_back(&d);
+
+    auto it = list.begin();
+    size_t idx = 0;
+    while (it != list.end()) {
+        if (idx++ % 2 == 1) {
+            it = list.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    std::vector<Span*> remaining;
+    for (Span& span: list) {
+        remaining.push_back(&span);
+    }
+    EXPECT_EQ(remaining.size(), 2u);
+    EXPECT_EQ(remaining[0], &a);
+    EXPECT_EQ(remaining[1], &c);
+}
+
+TEST(SpanTest, SpanList_UsableWithRangesAlgorithms) {
+    SpanList list;
+    Span a, b, c;
+    list.push_back(&a);
+    list.push_back(&b);
+    list.push_back(&c);
+
+    EXPECT_EQ(std::ranges::count_if(list, [](const Span&) { return true; }), 3u);
+
+    auto found = std::ranges::find_if(list, [&](const Span& s) { return &s == &b; });
+    ASSERT_NE(found, list.end());
+    EXPECT_EQ(&*found, &b);
+
+    Span missing;
+    EXPECT_EQ(std::ranges::find_if(list, [&](const Span& s) { return &s == &missing; }),
+              list.end());
 }
 
 TEST(SpanTest, FreeObjectUnderflowDeath) {
