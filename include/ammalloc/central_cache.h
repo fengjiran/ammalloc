@@ -81,7 +81,9 @@ public:
     /// @param aligned_size Size-class-aligned object size used to select the bucket.
     /// @return Number of fetched objects, which may be smaller on allocation failure.
     /// @pre `batch_num <= SizeClass::kMaxBatchSize`.
-    /// @pre `aligned_size` identifies a valid ThreadCache size class.
+    /// @pre `aligned_size` is an exact size-class boundary
+    ///      (`SizeClass::Size(SizeClass::Index(aligned_size)) == aligned_size`);
+    ///      Span::Init aborts otherwise in every build.
     size_t FetchRange(FreeList& block_list, size_t batch_num, size_t aligned_size);
 
     /// @brief Returns an intrusive object chain to the matching shared bucket.

@@ -114,7 +114,7 @@ TEST_F(CentralCacheTest, BasicReleaseListToSpans) {
 
 // 测试点 4: 不同 Size Class 的分配
 TEST_F(CentralCacheTest, DifferentSizeClasses) {
-    std::vector<size_t> sizes = {8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096};
+    std::vector<size_t> sizes = {16, 32, 64, 128, 160, 256, 512, 1024, 2048, 4096};
 
     for (size_t size: sizes) {
         FreeList list;
@@ -393,7 +393,7 @@ TEST_F(CentralCacheTest, FreeListMaxSize) {
 // 测试点 13: 小对象分配（8 字节请求映射到最小 16 字节类）
 TEST_F(CentralCacheTest, SmallObjectAllocation) {
     FreeList list;
-    size_t obj_size = 8;
+    size_t obj_size = SizeClass::RoundUp(8);// 8 映射到 16 字节类，Span 按类别尺寸雕刻
 
     size_t fetched = central_cache_.FetchRange(list, 50, obj_size);
     EXPECT_GT(fetched, 0);

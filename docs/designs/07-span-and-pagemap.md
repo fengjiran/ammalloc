@@ -49,7 +49,7 @@ Span 描述一段连续页区间及其对象分配状态，是 PageCache 切分/
 
 | 接口 | 签名 | 语义要点 | Hot path |
 |---|---|---|---|
-| `Span::Init` | `void Init(size_t aligned_object_size)` | `@pre` Span 归当前 CentralCache 桶独占；计算 bitmap+数据布局并置位空闲 bitmap | ❌ |
+| `Span::Init` | `void Init(size_t aligned_object_size)` | `@pre` Span 归当前 CentralCache 桶独占；`aligned_object_size` 必须是精确类别边界（`Size(Index(s)) == s` 且 ≤ MAX_TC_SIZE），违反即 `AM_CHECK` 在所有构建 abort；计算 bitmap+数据布局并置位空闲 bitmap | ❌ |
 | `Span::AllocObject` | `void* AllocObject()` | 清一个空闲位；满时返回 null；`scan_cursor` 推进 | ✅ |
 | `Span::FreeObject` | `void FreeObject(void* ptr)` | 置回空闲位；`AM_DCHECK` 检出 double-free；回退 `scan_cursor` | ✅ |
 | `SpanList::insert/erase/push_front/push_back/pop_front` | 静态/成员 | 循环哨兵免空分支；不持有元数据 | ✅ |
@@ -67,6 +67,7 @@ bitmap 放页区起始（1 bit/对象），数据区按 ALIGNMENT 对齐其后�
   max_objs  ≈ (总字节 × BITS_PER_BYTE) / (obj_size × BITS_PER_BYTE + 1)
   capacity  = 对齐后 (data_end - data_start) / obj_size（可能小于 max_objs）
 ```
+- 创建期不变式（`AM_CHECK`，所有构建生效）：`0 < obj_size ≤ MAX_TC_SIZE` 且 `Size(Index(obj_size)) == obj_size`；非边界尺寸在雕刻对象网格之前即 abort，杜绝释放期槽位计算与桶索引不一致的静默错类复用。free 侧另有 `AM_HCHECK` 交叉校验（debug / `AM_HARDENED`）比对 `size_class_idx` 与 `aligned_obj_size`，把创建后元数据损坏转为确定性 abort。
 - bitmap 字几何常量统一取自 `SystemConfig::BITMAP_BITS/SHIFT/MASK` 与 `BITS_PER_BYTE`（config.h，分别派生自 `std::countr_zero` 与 `std::numeric_limits<unsigned char>::digits`），代码中不出现 64/63/6/8 字面量；字数按 `(max_objs + BITMAP_MASK) >> BITMAP_SHIFT` 取整。
 - 不存数据指针，`obj_offset` 派生存取，保证 Span 保持 64B。
 

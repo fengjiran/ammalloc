@@ -1,8 +1,13 @@
 #include "ammalloc/ammalloc.h"
 #include "ammalloc/config.h"
 #include "ammalloc/page_allocator.h"
+#include "ammalloc/page_cache.h"
+#include "ammalloc/size_class.h"
 
 #include <gtest/gtest.h>
+
+#include <thread>
+#include <vector>
 
 namespace {
 
@@ -161,6 +166,64 @@ TEST(AmMallocHardeningTest, SmallObjectInteriorPointerDeath) {
     void* p = am_malloc(64);
     ASSERT_NE(p, nullptr);
     EXPECT_DEATH(am_free(static_cast<char*>(p) + 1), "Check failed");
+    am_free(p);
+#endif
+}
+
+// am_free cross-checks span->size_class_idx against span->aligned_obj_size
+// before pushing into ThreadCache, so corrupted Span metadata aborts instead
+// of feeding the object into a wrong-size class. The corruption happens in the
+// parent before EXPECT_DEATH forks, so the field is restored before the final
+// am_free of the (untouched) parent object.
+TEST(AmMallocHardeningTest, CorruptedSizeClassIndexOutOfRangeDeath) {
+#if defined(AM_HARDENED) || !defined(NDEBUG)
+    void* p = am_malloc(64);
+    ASSERT_NE(p, nullptr);
+    auto* span = PageMap::GetSpan(p);
+    ASSERT_NE(span, nullptr);
+
+    const auto saved = span->size_class_idx;
+    span->size_class_idx = static_cast<uint16_t>(SizeClass::kNumSizeClasses);
+    EXPECT_DEATH(am_free(p), "Check failed");
+    span->size_class_idx = saved;
+    am_free(p);
+#endif
+}
+
+// The freeing thread begins with no ThreadCache. The metadata check must run
+// before am_free dispatches to am_free_slow_path, where a corrupted index would
+// otherwise bypass the fast-path-only guard.
+TEST(AmMallocHardeningTest, CorruptedSizeClassIndexOnThreadFirstFreeDeath) {
+#if defined(AM_HARDENED) || !defined(NDEBUG)
+    void* p = am_malloc(64);
+    ASSERT_NE(p, nullptr);
+    auto* span = PageMap::GetSpan(p);
+    ASSERT_NE(span, nullptr);
+
+    const auto saved = span->size_class_idx;
+    span->size_class_idx = static_cast<uint16_t>(SizeClass::kNumSizeClasses);
+    EXPECT_DEATH(
+            {
+                std::thread freer([p] { am_free(p); });
+                freer.join();
+            },
+            "Check failed");
+    span->size_class_idx = saved;
+    am_free(p);
+#endif
+}
+
+TEST(AmMallocHardeningTest, CorruptedSizeClassMismatchDeath) {
+#if defined(AM_HARDENED) || !defined(NDEBUG)
+    void* p = am_malloc(64);
+    ASSERT_NE(p, nullptr);
+    auto* span = PageMap::GetSpan(p);
+    ASSERT_NE(span, nullptr);
+
+    const auto saved = span->size_class_idx;
+    span->size_class_idx = static_cast<uint16_t>(SizeClass::Index(128));
+    EXPECT_DEATH(am_free(p), "Check failed");
+    span->size_class_idx = saved;
     am_free(p);
 #endif
 }

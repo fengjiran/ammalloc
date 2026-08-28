@@ -103,7 +103,10 @@ struct alignas(SystemConfig::CACHE_LINE_SIZE) Span {
     }
 
     /// @brief Initializes bitmap and size-class metadata for object allocation.
-    /// @param aligned_object_size Valid size-class-aligned object size.
+    /// @param aligned_object_size Exact size-class size: it must equal
+    ///        `SizeClass::Size(SizeClass::Index(aligned_object_size))` and lie
+    ///        in `(0, SizeConfig::MAX_TC_SIZE]`. Violations abort via AM_CHECK
+    ///        in every build so a misaligned object grid is never carved.
     /// @pre The Span is exclusively owned by the calling CentralCache bucket.
     void Init(size_t aligned_object_size);
 

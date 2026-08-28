@@ -117,7 +117,7 @@ AM_NOINLINE void* am_malloc_slow_path(size_t original_size) {
     return pTLSThreadCache->Allocate(original_size);
 }
 
-AM_NOINLINE void am_free_slow_path(void* ptr, Span* span, size_t aligned_size) {
+AM_NOINLINE void am_free_slow_path(void* ptr, Span* span, size_t aligned_size, size_t idx) {
     // Large-object Spans do not carry an object size and return directly to PageCache.
     if (aligned_size == 0) {
         AM_HCHECK(ptr == span->GetPageBaseAddr(), "Invalid large-object pointer.");
@@ -136,7 +136,7 @@ AM_NOINLINE void am_free_slow_path(void* ptr, Span* span, size_t aligned_size) {
     }
     // clang-format on
 
-    pTLSThreadCache->Deallocate(ptr, span->size_class_idx);
+    pTLSThreadCache->Deallocate(ptr, idx);
 }
 
 }// namespace
@@ -166,17 +166,24 @@ void am_free(void* ptr) {
         return;
     }
 
-    auto aligned_size = span->aligned_obj_size;
+    const auto aligned_size = span->aligned_obj_size;
+    const size_t idx = span->size_class_idx;
+    AM_HCHECK(aligned_size == 0 ||
+                      (idx < SizeClass::kNumSizeClasses &&
+                       SizeClass::Size(idx) == aligned_size),
+              "Corrupted Span size-class metadata.");
+
     auto* tc = pTLSThreadCache;
     if (aligned_size == 0 || tc == nullptr) AM_UNLIKELY {
-        am_free_slow_path(ptr, span, aligned_size);
+        am_free_slow_path(ptr, span, aligned_size, idx);
         return;
     }
     // clang-format on
 
     AM_HCHECK(span->ObjectSlotOf(ptr) != std::numeric_limits<size_t>::max(),
               "Invalid small-object pointer.");
-    tc->Deallocate(ptr, span->size_class_idx);
+
+    tc->Deallocate(ptr, idx);
 }
 
 }// namespace ammalloc

@@ -89,7 +89,7 @@ void PageMap::SetSpan(Span* span) {
             p2->children[i2].store(p3, std::memory_order_release);
         }
 
-        size_t cnt = std::min(end - start, PageConfig::RADIX_NODE_SIZE - i3);
+        size_t cnt = std::min<size_t>(end - start, PageConfig::RADIX_NODE_SIZE - i3);
         for (size_t k = 0; k < cnt; ++k) {
             p3->children[i3 + k].store(span, std::memory_order_release);
         }

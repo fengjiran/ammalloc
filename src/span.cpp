@@ -4,10 +4,17 @@
 namespace ammalloc {
 
 void Span::Init(size_t aligned_object_size) {
-    AM_HCHECK(aligned_object_size > 0 &&
-              aligned_object_size <= std::numeric_limits<uint32_t>::max());
+    // Creation-time invariant, active in every build: a Span may only carve an
+    // exact size-class grid, so free-time slot math and bucket indexing always
+    // agree. Abort here rather than carving a misaligned grid.
+    AM_CHECK(aligned_object_size > 0 &&
+             aligned_object_size <= SizeConfig::MAX_TC_SIZE);
+    const size_t idx = SizeClass::Index(aligned_object_size);
+    AM_CHECK(idx < SizeClass::kNumSizeClasses &&
+             SizeClass::Size(idx) == aligned_object_size);
+
     aligned_obj_size = static_cast<uint32_t>(aligned_object_size);
-    size_class_idx = SizeClass::Index(aligned_obj_size);
+    size_class_idx = static_cast<uint16_t>(idx);
     void* start_ptr = detail::PageIDToPtr(start_page_idx);
     const size_t total_bytes = page_num << SystemConfig::PAGE_SHIFT;
 

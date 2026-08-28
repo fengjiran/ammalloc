@@ -114,7 +114,7 @@ TEST(SpanTest, AllocObject_AddressesWithinDataRange) {
 }
 
 TEST(SpanTest, FreeObject_NonPowerOfTwoSize) {
-    TestSpan ts(24);// Non-power-of-two: FreeObject resolves slots by division.
+    TestSpan ts(160);// Non-power-of-two class size: FreeObject resolves slots by division.
 
     std::vector<void*> objs;
     for (int i = 0; i < 10; ++i) {
@@ -171,7 +171,6 @@ TEST(SpanTest, FreeObjectThenReallocSameSlot) {
 }
 
 TEST(SpanTest, Init_ZeroObjectSizeDeath) {
-#if defined(AM_HARDENED) || !defined(NDEBUG)
     void* ptr = PageAllocator::SystemAlloc(1);
     ASSERT_NE(ptr, nullptr);
     Span span(detail::PtrToPageId(ptr), 1);
@@ -179,11 +178,32 @@ TEST(SpanTest, Init_ZeroObjectSizeDeath) {
     EXPECT_DEATH(span.Init(0), "Check failed");
 
     PageAllocator::SystemFree(ptr, 1);
-#endif
+}
+
+// Init enforces its creation-time invariant with AM_CHECK, which is active in
+// every build, so these death tests need no NDEBUG/HARDENED guard.
+TEST(SpanTest, Init_NonClassSizeDeath) {
+    void* ptr = PageAllocator::SystemAlloc(1);
+    ASSERT_NE(ptr, nullptr);
+    Span span(detail::PtrToPageId(ptr), 1);
+
+    EXPECT_DEATH(span.Init(24), "Check failed");
+
+    PageAllocator::SystemFree(ptr, 1);
+}
+
+TEST(SpanTest, Init_OversizeDeath) {
+    void* ptr = PageAllocator::SystemAlloc(1);
+    ASSERT_NE(ptr, nullptr);
+    Span span(detail::PtrToPageId(ptr), 1);
+
+    EXPECT_DEATH(span.Init(SizeConfig::MAX_TC_SIZE + 1), "Check failed");
+
+    PageAllocator::SystemFree(ptr, 1);
 }
 
 TEST(SpanTest, Init_MultiPageLayout) {
-    TestSpan ts(24, 2);
+    TestSpan ts(160, 2);
     auto* page_base = static_cast<char*>(ts.span.GetPageBaseAddr());
     const size_t total_bytes = ts.page_num << SystemConfig::PAGE_SHIFT;
     auto* data_base = static_cast<char*>(ts.span.GetDataBasePtr());
