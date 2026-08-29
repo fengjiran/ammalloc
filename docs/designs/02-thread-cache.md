@@ -113,7 +113,11 @@ return {current, overages + 1};                                             // �
 
 ### 6.4 复杂度
 
-所有路径 O(1)；慢路径每事件固定工作量（≤ 1 batch），无隐藏 O(N²)。
+- `Allocate` / `Deallocate` 快路径：O(1)。
+- Refill 慢路径：O(batch)，取货量与 `FetchRange` 搬运均以 `batch` 为界。
+- **Trim 慢路径：O(`max_size`)，不是 O(1)。** `Deallocate` 先 `push` 再判 `size() > max_size()`，故进入时链深恰为 `max_size + 1`；`pop_range_tail(batch)` 归还的对象数受 `batch` 有界，但**定位驱逐点需要走完整条链**（≈ `size_ - 2` 步串行依赖 load），此外还要走完后缀求尾。"每事件 ≤ 1 batch" 只约束搬运对象数，不约束遍历代价。
+- 上限由配额策略参数决定：`max_size ≤ kMaxQuotaBatches × batch`，故 16B/64B 类最坏单次 trim ≈ 4095 步（实测 ≈ 8.2 µs，摊销 ≈ 16 ns/free）。详见 [08-free-list.md](08-free-list.md) §6.6。
+- 无隐藏 O(N²)：每个事件只扫一遍链，不随事件次数累积。
 
 ## 7. 边界条件与错误处理
 
@@ -150,3 +154,4 @@ return {current, overages + 1};                                             // �
 | 2026-08-21 | 补充 §6.1 慢启动与配额衰减策略（增长/衰减纯函数、数值演化、设计意图） | 沉淀慢启动实现逻辑 | — |
 | 2026-08-21 | 补充 §9 三个测试用例（TLS 生命周期、跨线程 free、配额有界收敛） | 覆盖 I1/I2 测试缺口 | — |
 | 2026-08-21 | 补充 §9 `PartialRefillHoldsQuotaAndOverage`（部分 refill 分支） | 覆盖 G1 测试缺口 | — |
+| 2026-08-28 | §6.4 撤销"所有路径 O(1)"，改为逐路径复杂度并标注 trim 为 O(`max_size`) | 原"≤ 1 batch"混淆了归还对象数与定位代价；`pop_range_tail` 需遍历整条链 | S-3 |

@@ -57,7 +57,8 @@
 | `size` | `size_t size() const noexcept` | 当前对象数 | ✅ |
 | `push` | `void push(void* ptr) noexcept` | `nullptr` 直接忽略；`block->next = head_` 后前插，`++size_` | ✅ |
 | `push_range` | `void push_range(const FreeChain& chain) noexcept` | `head`/`tail`/`count` 任一为空/零则拒绝；debug 下校验链长与尾可达；`tail->next = head_` 后整体前插，`size_ += count` | ❌ |
-| `pop_range` | `FreeChain pop_range(size_t n) noexcept` | 摘取链头最多 `n` 个，保持原序；产出链被终结（`tail->next == nullptr`），不足时摘取全部 | ❌ |
+| `pop_range` | `FreeChain pop_range(size_t n) noexcept` | 摘取链头最多 `n` 个，保持原序；产出链被终结（`tail->next == nullptr`），不足时摘取全部；O(n) | ❌ |
+| `pop_range_tail` | `FreeChain pop_range_tail(size_t n) noexcept` | 摘取链尾最多 `n` 个（驱逐最旧、保留链头最新对象供本地复用）；`n >= size_` 时整链摘取；**O(`size_`) 遍历**，非 O(n) | ❌ |
 | `pop` | `void* pop() noexcept` | 空表返回 `nullptr`；对下一节点发预取；`head_ = head_->next`，`--size_` | ✅ |
 | `max_size` / `set_max_size` | `size_t () const` / `void (size_t n)` | 读/写高水位；`set_max_size` debug 下要求 `n >= 1`，并钳到至少 1 | ❌ |
 | `overages` / `set_overages` | `size_t () const` / `void (size_t n)` | 读/写连续溢出计数 | ❌ |
@@ -92,10 +93,21 @@ head_ = head_->next; --size_;
 
 debug 下调用静态私有助手 `CountChain(head, tail)` 校验链长与尾可达（不一致则 `AM_DCHECK` 中止），随后 `tail->next = head_`、`head_ = chain.head`、`size_ += chain.count`。
 
-### 6.5 复杂度与不变量
+### 6.5 尾部批量出链 `pop_range_tail(n)`
 
-- 单对象路径 O(1)；`pop_range`/`push_range` 为 O(n)（n 为摘取/回灌数量），但在 ThreadCache 中受 `batch` 有界，无隐藏 O(N²)。
-- 核心不变量（debug 下经 `AM_DCHECK` 校验）：`head_ == nullptr` 当且仅当 `size_ == 0`；`pop_range` 产出链尾 `next == nullptr`。
+取 `pop_count = min(n, size_)`、`keep = size_ - pop_count`，保留区间 `[0, keep)`、驱逐后缀 `[keep, size_)`：先沿链走 `keep - 1` 步定位保留尾并断链，再走完后缀求 `tail`。两趟合计 ≈ `size_` 步**串行依赖的指针 load**，所以代价由**链深**决定而非 `n`。`keep == 0`（整链驱逐）时第一趟为零步，退化成单趟。
+
+语义目标是"驱逐最旧、留住最新"，与 `pop_range` 的表头摘取互补，专供 ThreadCache 溢出 trim 使用（见 [02-thread-cache.md](02-thread-cache.md) §6.3）。
+
+### 6.6 复杂度与不变量
+
+- `push` / `pop`：O(1)。
+- `push_range`：O(1)（`CountChain` 仅存在于 debug 构建）。
+- `pop_range`：O(n)，`n` 为摘取数量，在 ThreadCache 中受 `batch` 有界。
+- `pop_range_tail`：**O(`size_`)，与 `n` 无关，不受 `batch` 有界**。ThreadCache 调用点处 `size_ == max_size + 1`，而配额上限是 `kMaxQuotaBatches × batch`，因此该遍历的代价上限由**配额策略参数**隐式决定：16B/64B 类当前为 `8 × 512 + 1 = 4097` 步。
+- 实测（本机 x86_64 / `-O2`，真实 16B 对象、64 KiB 足迹、链深 4097）：单次 trim 事件 ≈ 8.2 µs，摊销 ≈ 16 ns/free。由于跳数 / `batch` 恒为 `kMaxQuotaBatches`，摊销成本近似等于 `8 × 单跳依赖延迟`，与尺寸类别无关；`batch` 更小的中间类别（如 256B，`batch=128`）反而更差。
+- 无隐藏 O(N²)：每次事件只扫一遍链，不随事件次数累积。
+- 核心不变量（debug 下经 `AM_DCHECK` 校验）：`head_ == nullptr` 当且仅当 `size_ == 0`；`pop_range` / `pop_range_tail` 产出链尾 `next == nullptr`。
 
 ## 7. 边界条件与错误处理
 
@@ -125,3 +137,4 @@ debug 下调用静态私有助手 `CountChain(head, tail)` 校验链长与尾可
 | 日期 | 变更 | 原因 | 关联 PR / ADR |
 |---|---|---|---|
 | 2026-08-21 | 初版（FreeList 独立成文，自 02-thread-cache.md 拆分细化） | FreeList 拥有独立头文件与独立测试套件，单列模块设计 | — |
+| 2026-08-28 | 接口表补 `pop_range_tail`、新增 §6.5 算法小节；§6.6 逐项改写复杂度并给出实测值 | 该成员此前无文档，导致 `pop_range` 的 `batch` 上界被误推广到 O(`size_`) 的尾部遍历 | S-3 |
