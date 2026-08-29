@@ -39,7 +39,7 @@ QuotaState NextAfterOverflow(size_t current, size_t batch, size_t overages) noex
 
 }// namespace quota_policy
 
-void ThreadCache::ReleaseAll() {
+void ThreadCache::ReleaseAll() noexcept {
     for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
         auto& list = free_lists_[i];
         if (list.empty()) {

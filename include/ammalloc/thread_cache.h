@@ -108,7 +108,7 @@ public:
     /// @pre `idx < SizeClass::kNumSizeClasses`
     /// @note The fast path is a single FreeList push. Slow path is entered only
     ///       when local occupancy reaches the current per-class limit.
-    AM_ALWAYS_INLINE void Deallocate(void* ptr, size_t idx) {
+    AM_ALWAYS_INLINE void Deallocate(void* ptr, size_t idx) noexcept {
         AM_DCHECK(ptr != nullptr);
         AM_DCHECK(idx < SizeClass::kNumSizeClasses);
 
@@ -130,7 +130,7 @@ public:
     ///
     /// Used during TLS teardown and tests to avoid keeping thread-local state
     /// alive longer than the owning thread.
-    void ReleaseAll();
+    void ReleaseAll() noexcept;
 
     /// @brief Returns a FreeList high-water limit for testing.
     /// @param idx Size-class index.

@@ -131,7 +131,7 @@ class PageMap {
 
 - `bucket_locks_[K]`：桶分段锁（K 建议 8/16）
 - `pagemap_write_lock_`：PageMap 写锁（`SetSpan/ClearRange/Reset`）
-- `span_pool_lock_`：若 `ObjectPool` 非并发安全时保护池操作
+- `span_pool_lock_`：保护池操作。`ObjectPool` 已明确为**非并发安全**（内部 mutex 已移除），该前提不再可选；当前实现不引入独立池锁，而是复用持有者的锁——`span_pool_` 由所属分片 `mutex_` 串行化，进程级共享的 `radix_node_pool_` 由 `PageMap::structure_mutex_` 串行化。待分片路由真正启用后再评估是否需要拆分独立池锁。
 
 映射策略：
 

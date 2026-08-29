@@ -6,6 +6,7 @@
 /// @see docs/designs/03-central-cache.md
 
 #include "ammalloc/free_list.h"
+#include "ammalloc/noalloc_diagnostics.h"
 #include "ammalloc/size_class.h"
 #include "ammalloc/span.h"
 #include "ammalloc/spin_lock.h"
@@ -84,13 +85,13 @@ public:
     /// @pre `aligned_size` is an exact size-class boundary
     ///      (`SizeClass::Size(SizeClass::Index(aligned_size)) == aligned_size`);
     ///      Span::Init aborts otherwise in every build.
-    size_t FetchRange(FreeList& block_list, size_t batch_num, size_t aligned_size);
+    size_t FetchRange(FreeList& block_list, size_t batch_num, size_t aligned_size) noexcept;
 
     /// @brief Returns an intrusive object chain to the matching shared bucket.
     /// @param start Head of a non-empty chain of objects from one size class.
     /// @param aligned_size Size-class-aligned object size shared by every object.
     /// @pre Each object belongs to an ammalloc Span for `aligned_size`.
-    void ReleaseListToSpans(void* start, size_t aligned_size);
+    void ReleaseListToSpans(void* start, size_t aligned_size) noexcept;
 
     /// @brief Releases cached objects and spans, then rebuilds the TransferCache
     ///        backing so the singleton keeps its O(1) fast path afterwards.
@@ -99,24 +100,21 @@ public:
     void Reset() noexcept;
 
 private:
-    CentralCache() {
-        InitTransferCache();
+    CentralCache() noexcept {
+        // A failed backing allocation leaves all capacities at zero. Fetch and
+        // release then use the SpanList path without retrying on every request.
+        static_cast<void>(TryInitTransferCache());
     }
-
-    /// @brief Allocates and partitions contiguous backing storage for all TransferCaches.
-    /// @note Uses PageAllocator directly to prevent recursive `am_malloc` entry.
-    ///       Aborts on failure: constructor-time OOM leaves the allocator unusable.
-    void InitTransferCache();
 
     /// @brief (Re)allocates TransferCache backing without aborting.
     /// @return True when the backing is ready; on failure every bucket slice
     ///         stays zeroed and callers degrade to the SpanList slow path.
-    /// @note Shared by InitTransferCache (aborting wrapper) and Reset (rebuild).
+    /// @note Used at construction and Reset; failure is a permanent SpanList
+    ///       fallback until a controlled Reset retries initialization.
     bool TryInitTransferCache() noexcept;
 
     /// @brief Returns the total pointer capacity of all TransferCache buckets.
-    /// @note Single source of truth for the contiguous backing size; shared by
-    ///       InitTransferCache (allocation) and Reset (release).
+    /// @note Single source of truth for the contiguous backing size.
     static size_t CalculateTotalTransferPtrs() noexcept;
 
     /// @brief Obtains and initializes a Span for one bucket.
@@ -128,7 +126,7 @@ private:
     /// @return Borrowed Span owned by PageCache, or null on allocation failure.
     /// @pre `lock` owns `bucket.span_list_lock`.
     static Span* GetOneSpan(Bucket& bucket, size_t aligned_size,
-                            std::unique_lock<std::mutex>& lock);
+                            detail::NoThrowUniqueLock& lock) noexcept;
 
     constexpr static size_t kCapScale = 8;
     /// One independently synchronized bucket per size class.

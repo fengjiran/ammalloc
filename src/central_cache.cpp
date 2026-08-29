@@ -3,15 +3,14 @@
 #include "ammalloc/page_cache.h"
 #include "ammalloc/spin_lock.h"
 
-#include <spdlog/spdlog.h>
-
 namespace ammalloc {
 
 #ifdef AMMALLOC_TEST
 std::atomic<size_t> g_mock_fetch_range_cap{0};
 #endif
 
-size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num, size_t aligned_size) {
+size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num,
+                                size_t aligned_size) noexcept {
     AM_DCHECK(batch_num <= SizeClass::kMaxBatchSize);
 #ifdef AMMALLOC_TEST
     if (const size_t cap = g_mock_fetch_range_cap.load(std::memory_order_relaxed);
@@ -56,7 +55,7 @@ size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num, size_t a
         size_t actual_prefetched = 0;
         size_t extracted = 0;
 
-        std::unique_lock<std::mutex> lock(bucket.span_list_lock);
+        detail::NoThrowUniqueLock lock(bucket.span_list_lock);
         auto& cur_span_list = bucket.span_list;
         auto begin = cur_span_list.begin();
         while (extracted < extract_target) {
@@ -130,7 +129,7 @@ size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num, size_t a
     return fetched;
 }
 
-void CentralCache::ReleaseListToSpans(void* start, size_t aligned_size) {
+void CentralCache::ReleaseListToSpans(void* start, size_t aligned_size) noexcept {
     const auto idx = SizeClass::Index(aligned_size);
     auto& bucket = buckets_[idx];
     void* cur = start;
@@ -159,7 +158,7 @@ void CentralCache::ReleaseListToSpans(void* start, size_t aligned_size) {
             // PageCache entry while holding a CentralCache mutex (which would
             // invert the allocator lock order).
             Span* empty_span_head = nullptr;
-            std::unique_lock<std::mutex> lock(bucket.span_list_lock);
+            detail::NoThrowUniqueLock lock(bucket.span_list_lock);
             for (size_t i = pushed; i < local_count; ++i) {
                 void* obj = local_ptrs[i];
                 auto* span = PageMap::GetSpan(obj);
@@ -210,7 +209,7 @@ void CentralCache::Reset() noexcept {
 
         Span* span_list_head = nullptr;
         {
-            std::lock_guard<std::mutex> lock(bucket.span_list_lock);
+            detail::NoThrowLockGuard lock(bucket.span_list_lock);
 
             // Restore bitmap ownership for every object detached from TransferCache.
             void* cur = head;
@@ -256,10 +255,7 @@ void CentralCache::Reset() noexcept {
 
     // Rebuild the backing so the singleton keeps its O(1) fast path after
     // Reset; an OOM here degrades gracefully to the SpanList slow path.
-    if (!TryInitTransferCache()) {
-        spdlog::warn("CentralCache Reset could not renew TransferCaches; "
-                     "continuing without the fast path.");
-    }
+    static_cast<void>(TryInitTransferCache());
 }
 
 size_t CentralCache::CalculateTotalTransferPtrs() noexcept {
@@ -292,15 +288,8 @@ bool CentralCache::TryInitTransferCache() noexcept {
     return true;
 }
 
-void CentralCache::InitTransferCache() {
-    if (!TryInitTransferCache()) {
-        spdlog::critical("CentralCache failed to allocate memory for TransferCaches!");
-        std::abort();
-    }
-}
-
 Span* CentralCache::GetOneSpan(Bucket& bucket, size_t aligned_size,
-                               std::unique_lock<std::mutex>& lock) {
+                               detail::NoThrowUniqueLock& lock) noexcept {
     lock.unlock();
     auto page_num = SizeClass::GetMovePageNum(aligned_size);
     auto* span = PageCache::GetInstance().AllocSpan(page_num);

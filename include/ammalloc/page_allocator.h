@@ -13,7 +13,8 @@
 
 #include <atomic>
 #include <cstddef>
-#include <mutex>
+#include <type_traits>
+#include <utility>
 
 namespace ammalloc {
 
@@ -74,37 +75,37 @@ public:
     /// @brief Allocates a page-aligned mapping containing `page_num` pages.
     /// @param page_num Number of system pages to allocate.
     /// @return Page-aligned mapping, or null for invalid input or allocation failure.
-    static void* SystemAlloc(size_t page_num);
+    static void* SystemAlloc(size_t page_num) noexcept;
 
     /// @brief Releases or caches a mapping returned by `SystemAlloc`.
     /// @param ptr Mapping base address; null is accepted as a no-op.
     /// @param page_num Original mapping length in system pages; zero is a no-op.
     /// @note An aligned mapping of exactly `HUGE_PAGE_SIZE` bytes is eligible for
     ///       the internal cache after successful `MADV_DONTNEED`.
-    static void SystemFree(void* ptr, size_t page_num);
+    static void SystemFree(void* ptr, size_t page_num) noexcept;
 
     /// @brief Resets all telemetry counters to zero.
-    static void ResetStats();
+    static void ResetStats() noexcept;
 
     /// @brief Unmaps all standard huge pages currently held by the cache.
     /// @note Intended for tests and controlled teardown after concurrent use stops.
-    static void ReleaseHugePageCache();
+    static void ReleaseHugePageCache() noexcept;
 
     /// @brief Records one `munmap` failure in telemetry.
     /// @note Used internally by HugePageCache during controlled cache release.
-    static void RecordMunmapFailure() {
+    static void RecordMunmapFailure() noexcept {
         stats_.munmap_failed_count.fetch_add(1, std::memory_order_relaxed);
     }
 
 private:
     inline static PageAllocatorStats stats_;
 
-    static void* AllocWithRetry(size_t size, int flags);
-    static void ApplyHugePageHint(void* ptr, size_t size);
-    static void* AllocNormalPage(size_t size);
-    static void* AllocHugePageWithTrim(size_t size);
-    static void* AllocHugePage(size_t size);
-    static bool SafeMunmap(void* ptr, size_t size);
+    static void* AllocWithRetry(size_t size, int flags) noexcept;
+    static void ApplyHugePageHint(void* ptr, size_t size) noexcept;
+    static void* AllocNormalPage(size_t size) noexcept;
+    static void* AllocHugePageWithTrim(size_t size) noexcept;
+    static void* AllocHugePage(size_t size) noexcept;
+    static bool SafeMunmap(void* ptr, size_t size) noexcept;
 
     PAGEALLOCATOR_FRIEND_TEST;
 };
@@ -112,9 +113,11 @@ private:
 /// @brief Owns and recycles fixed-size objects in PageAllocator-backed chunks.
 ///
 /// The pool owns all allocated chunks until `ReleaseMemory()` or destruction.
-/// `New()` constructs `T` in-place and `Delete()` destroys `T` then recycles storage.
-/// All mutation is serialized by an internal mutex.
+/// `TryNew()` constructs `T` in-place and `Delete()` destroys `T` then recycles storage.
 ///
+/// @note Not thread-safe. Every member mutates pool state unconditionally, so the
+///       caller must serialize all use of a given pool. Each pooled instance names
+///       the lock that provides that serialization.
 /// @tparam T Object type; its storage must hold an intrusive free-list pointer.
 /// @tparam CHUNK_SIZE Target number of bytes requested for each new chunk.
 template<typename T, size_t CHUNK_SIZE = 64 * 1024>
@@ -123,16 +126,19 @@ class ObjectPool {
 public:
     ObjectPool() = default;
 
-    /// @brief Constructs one object in pooled storage.
+    static_assert(std::is_nothrow_destructible_v<T>,
+                  "ObjectPool metadata destructors must not throw");
+
+    /// @brief Constructs one object in pooled storage without throwing on OOM.
     /// @tparam Args Constructor argument types.
     /// @param args Arguments forwarded to the `T` constructor.
-    /// @return Pointer to the constructed object owned by the caller until `Delete`.
-    /// @throws std::bad_alloc if the underlying page allocation fails.
-    /// @throws Any exception propagated by the selected `T` constructor.
+    /// @return Pointer to the constructed object owned by the caller until `Delete`,
+    ///         or null if a backing page mapping cannot be acquired.
+    /// @note `T` construction is constrained to no-throw so metadata OOM is
+    ///       represented uniformly as a null result.
     template<typename... Args>
-        requires std::is_constructible_v<T, Args...>
-    T* New(Args&&... args) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        requires std::is_nothrow_constructible_v<T, Args...>
+    T* TryNew(Args&&... args) noexcept {
         if (free_list_) {
             void* obj = free_list_;
             free_list_ = free_list_->next;
@@ -148,7 +154,7 @@ public:
             size_t page_num = (needed_bytes + SystemConfig::PAGE_SIZE - 1) >> SystemConfig::PAGE_SHIFT;
             void* ptr = PageAllocator::SystemAlloc(page_num);
             if (!ptr) {
-                throw std::bad_alloc();
+                return nullptr;
             }
 
             auto* new_chunk = static_cast<ChunkHeader*>(ptr);
@@ -173,8 +179,7 @@ public:
     /// @brief Destroys an object and returns its storage to the pool.
     /// @param obj Live object previously returned by this pool.
     /// @pre `obj` is non-null and has not already been deleted.
-    void Delete(T* obj) {
-        std::lock_guard<std::mutex> lock(mutex_);
+    void Delete(T* obj) noexcept {
         obj->~T();
         auto* header = reinterpret_cast<FreeHeader*>(obj);
         header->next = free_list_;
@@ -183,8 +188,7 @@ public:
 
     /// @brief Releases every chunk owned by the pool.
     /// @pre No outstanding object is accessed during or after this call.
-    void ReleaseMemory() {
-        std::lock_guard<std::mutex> lock(mutex_);
+    void ReleaseMemory() noexcept {
         auto* cur = chunk_list_;
         while (cur) {
             auto* next = cur->next;
@@ -220,7 +224,6 @@ private:
     size_t remain_bytes_{0};
     FreeHeader* free_list_{nullptr};
     ChunkHeader* chunk_list_{nullptr};
-    std::mutex mutex_;
 };
 
 }// namespace ammalloc

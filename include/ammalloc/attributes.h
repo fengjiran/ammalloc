@@ -36,6 +36,17 @@
 #define AM_NODISCARD
 #endif
 
+/// @brief Marks a function as never returning to its caller when supported.
+///
+/// Without this, a call site in another translation unit cannot prove the
+/// callee aborts, so it must keep the post-call path alive and spill state
+/// across the call even though control never resumes there.
+#if AM_HAS_CPP_ATTRIBUTE(noreturn)
+#define AM_NORETURN [[noreturn]]
+#else
+#define AM_NORETURN
+#endif
+
 /// @brief Marks a control-flow path as likely when supported.
 #if AM_HAS_CPP_ATTRIBUTE(likely)
 #define AM_LIKELY [[likely]]

@@ -6,10 +6,11 @@
 #include "ammalloc/assert.h"
 #include "ammalloc/config.h"
 
+#include <chrono>
 #include <cstdint>
 #include <limits>
-#include <spdlog/spdlog.h>
 #include <sys/mman.h>
+#include <thread>
 
 namespace {
 
@@ -65,12 +66,10 @@ public:
         return true;
     }
 
-    void ReleaseAllForTesting() {
+    void ReleaseAllForTesting() noexcept {
         while (void* ptr = Get()) {
             if (munmap(ptr, ammalloc::SystemConfig::HUGE_PAGE_SIZE) != 0) {
                 ammalloc::PageAllocator::RecordMunmapFailure();
-                spdlog::error("munmap failed in HugePageCache::ReleaseAll: ptr={}, errno={}",
-                              ptr, errno);
             }
         }
     }
@@ -168,7 +167,7 @@ std::atomic<bool> g_mock_normal_alloc_fail{false};
 #endif
 
 
-void PageAllocator::ResetStats() {
+void PageAllocator::ResetStats() noexcept {
     stats_.normal_alloc_count.store(0, std::memory_order_relaxed);
     stats_.normal_alloc_success.store(0, std::memory_order_relaxed);
     stats_.normal_alloc_bytes.store(0, std::memory_order_relaxed);
@@ -190,7 +189,7 @@ void PageAllocator::ResetStats() {
     stats_.mmap_other_error_count.store(0, std::memory_order_relaxed);
 }
 
-bool PageAllocator::SafeMunmap(void* ptr, size_t size) {
+bool PageAllocator::SafeMunmap(void* ptr, size_t size) noexcept {
     if (!ptr || size == 0) {
         return true;
     }
@@ -204,15 +203,11 @@ bool PageAllocator::SafeMunmap(void* ptr, size_t size) {
     }
     // clang-format on
 
-    const int err = errno;
     stats_.munmap_failed_count.fetch_add(1, std::memory_order_relaxed);
-
-    // Keep allocator backend logging conservative.
-    spdlog::error("munmap failed: ptr={}, size={}, errno={}", ptr, size, err);
     return false;
 }
 
-void* PageAllocator::AllocWithRetry(size_t size, int flags) {
+void* PageAllocator::AllocWithRetry(size_t size, int flags) noexcept {
     AM_DCHECK(size > 0);
     AM_DCHECK((size & (SystemConfig::PAGE_SIZE - 1)) == 0);
 
@@ -232,8 +227,8 @@ void* PageAllocator::AllocWithRetry(size_t size, int flags) {
             }
         } else {
             stats_.mmap_other_error_count.fetch_add(1, std::memory_order_relaxed);
-            // Fatal/non-transient errors are not worth retrying.
-            spdlog::error("mmap failed: size={}, flags={}, errno={}", size, flags, err);
+            // Fatal/non-transient errors are not worth retrying. Telemetry is
+            // intentionally allocation-free because this is allocator core.
             return nullptr;
         }
     }
@@ -241,7 +236,7 @@ void* PageAllocator::AllocWithRetry(size_t size, int flags) {
     return nullptr;
 }
 
-void PageAllocator::ApplyHugePageHint(void* ptr, size_t size) {
+void PageAllocator::ApplyHugePageHint(void* ptr, size_t size) noexcept {
     AM_DCHECK(ptr != nullptr);
     AM_DCHECK(IsPageAligned(ptr));
     AM_DCHECK(size > 0);
@@ -256,15 +251,12 @@ void PageAllocator::ApplyHugePageHint(void* ptr, size_t size) {
     // Prefetch/populate strategy is configurable and independent of THP hint.
     if (RuntimeConfig::GetInstance().UseMapPopulate()) {
         if (madvise(ptr, size, MADV_WILLNEED) != 0) {
-            const int err = errno;
             stats_.madvise_failed_count.fetch_add(1, std::memory_order_relaxed);
-            spdlog::debug("madvise MADV_WILLNEED failed: ptr={}, size={}, errno={}",
-                          ptr, size, err);
         }
     }
 }
 
-void* PageAllocator::AllocNormalPage(size_t size) {
+void* PageAllocator::AllocNormalPage(size_t size) noexcept {
     AM_DCHECK(size > 0);
     AM_DCHECK((size & (SystemConfig::PAGE_SIZE - 1)) == 0);
 
@@ -292,7 +284,7 @@ void* PageAllocator::AllocNormalPage(size_t size) {
     return ptr;
 }
 
-void* PageAllocator::AllocHugePageWithTrim(size_t size) {
+void* PageAllocator::AllocHugePageWithTrim(size_t size) noexcept {
     AM_DCHECK(size > 0);
     AM_DCHECK((size & (SystemConfig::PAGE_SIZE - 1)) == 0);
 
@@ -300,7 +292,6 @@ void* PageAllocator::AllocHugePageWithTrim(size_t size) {
     // clang-format off
     if (size > (std::numeric_limits<size_t>::max() - SystemConfig::HUGE_PAGE_SIZE)) AM_UNLIKELY {
         stats_.huge_alloc_failed_count.fetch_add(1, std::memory_order_relaxed);
-        spdlog::error("AllocHugePageWithTrim size overflow: {}", size);
         return nullptr;
     }
     // clang-format on
@@ -344,14 +335,8 @@ void* PageAllocator::AllocHugePageWithTrim(size_t size) {
             head_mapped = false;
         }
 
-        if (head_mapped || body_mapped || tail_mapped) {
-            spdlog::error("AllocHugePageWithTrim cleanup incomplete: raw_ptr={}, alloc_size={}, "
-                          "head_mapped={}, body_mapped={}, tail_mapped={}",
-                          raw_ptr, alloc_size,
-                          static_cast<int>(head_mapped),
-                          static_cast<int>(body_mapped),
-                          static_cast<int>(tail_mapped));
-        }
+        // Failed munmaps are already counted by SafeMunmap. Do not log here:
+        // logging may allocate while this failure path owns allocator mappings.
     };
 
     if (head_gap > 0) {
@@ -395,7 +380,7 @@ void* PageAllocator::AllocHugePageWithTrim(size_t size) {
 // 1) First try exact-size mmap and accept it if already huge-page aligned.
 // 2) If misaligned, unmap it and retry with over-allocation + trimming.
 // This avoids extra VMA operations on the fast-success path.
-void* PageAllocator::AllocHugePage(size_t size) {
+void* PageAllocator::AllocHugePage(size_t size) noexcept {
     AM_DCHECK(size > 0);
     AM_DCHECK((size & (SystemConfig::PAGE_SIZE - 1)) == 0);
 
@@ -427,16 +412,14 @@ void* PageAllocator::AllocHugePage(size_t size) {
     return AllocHugePageWithTrim(size);
 }
 
-void* PageAllocator::SystemAlloc(size_t page_num) {
+void* PageAllocator::SystemAlloc(size_t page_num) noexcept {
     // clang-format off
     if (page_num == 0) AM_UNLIKELY {
-        spdlog::warn("SystemAlloc called with page_num = 0");
         return nullptr;
     }
 
     // Reject page counts whose byte-size conversion would wrap.
     if (page_num > (std::numeric_limits<size_t>::max() >> SystemConfig::PAGE_SHIFT)) AM_UNLIKELY {
-        spdlog::error("SystemAlloc page_num overflow: {}", page_num);
         return nullptr;
     }
 
@@ -477,7 +460,7 @@ void* PageAllocator::SystemAlloc(size_t page_num) {
     return ptr;
 }
 
-void PageAllocator::SystemFree(void* ptr, size_t page_num) {
+void PageAllocator::SystemFree(void* ptr, size_t page_num) noexcept {
     if (!ptr || page_num == 0) {
         return;
     }
@@ -485,7 +468,6 @@ void PageAllocator::SystemFree(void* ptr, size_t page_num) {
     // Reject page counts whose byte-size conversion would wrap.
     // clang-format off
     if (page_num > (std::numeric_limits<size_t>::max() >> SystemConfig::PAGE_SHIFT)) AM_UNLIKELY {
-        spdlog::error("SystemFree page_num overflow: {}", page_num);
         return;
     }
     // clang-format on
@@ -497,10 +479,7 @@ void PageAllocator::SystemFree(void* ptr, size_t page_num) {
     // backing (`MADV_DONTNEED`) to reduce future mmap/munmap overhead.
     if (size == SystemConfig::HUGE_PAGE_SIZE && IsHugePageAligned(ptr)) {
         if (madvise(ptr, size, MADV_DONTNEED) != 0) {
-            const int err = errno;
             stats_.madvise_failed_count.fetch_add(1, std::memory_order_relaxed);
-            spdlog::debug("madvise MADV_DONTNEED failed in SystemFree: ptr={}, size={}, errno={}",
-                          ptr, size, err);
             // Do not cache a mapping whose physical backing could not be discarded.
             SafeMunmap(ptr, size);
             return;
@@ -513,7 +492,7 @@ void PageAllocator::SystemFree(void* ptr, size_t page_num) {
     SafeMunmap(ptr, size);
 }
 
-void PageAllocator::ReleaseHugePageCache() {
+void PageAllocator::ReleaseHugePageCache() noexcept {
     HugePageCache::GetInstance().ReleaseAllForTesting();
 }
 

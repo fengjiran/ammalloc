@@ -21,7 +21,7 @@ Span 描述一段连续页区间及其对象分配状态，是 PageCache 切分/
 
 - **所有权**：Span 元数据由所属 PageCache 分片的 `ObjectPool` 唯一持有（owner-shard-local）；CentralCache 桶只借用；`SpanList` 不拥有节点。
 - **生命周期**：PageMap 的 RadixNode 运行期只增不减，绝不单独释放；仅 `Reset` 或进程退出时经 ObjectPool 统一回收。
-- **写入保护**：`PageMap::SetSpan`/`ClearRange` 必须在所属分片锁内调用（生产默认单分片即全局串行化）。
+- **写入保护**：`PageMap::SetSpan`/`ClearRange` 必须在所属分片锁内调用（生产默认单分片即全局串行化）。首次建立缺失 radix path 另由 structural mutex 串行化；这把锁不参与 `GetSpan` 或已有 path 的 remap。
 
 ## 3. 关键数据结构
 
@@ -42,7 +42,7 @@ Span 描述一段连续页区间及其对象分配状态，是 PageCache 切分/
 
 - **Span 字段非原子**：所有访问者必须持有对应锁（PageCache 分片锁或 CentralCache 桶锁），锁域在头文件注释中显式声明。
 - **PageMap 读路径**：`GetSpan` 逐层 `acquire` load，与写者的 `release` store 配对；任一空层立即返回 null；不获取任何锁。
-- **PageMap 写路径**：`SetSpan` 懒分配中间节点（`radix_node_pool_.New()`，页对齐），release store 安装；`ClearRange` 对空子树按覆盖范围整体跳过；root 首次发布前从静态 `root_storage_` 初始化。
+- **PageMap 写路径**：fresh mapping 先调用 `EnsureRange` 建立全部中间节点（`radix_node_pool_.TryNew()`，页对齐），成功后 `SetSpan` 仅做 leaf release store；`ClearRange` 对空子树按覆盖范围整体跳过；root 首次发布前从静态 `root_storage_` 初始化。
 - **内存序契约**：发布用 `release`，读取用 `acquire`，计数/初始化用 `relaxed`；禁止默认 `seq_cst`（硬性约束 §4.4）。
 
 ## 5. 接口定义
@@ -54,7 +54,8 @@ Span 描述一段连续页区间及其对象分配状态，是 PageCache 切分/
 | `Span::FreeObject` | `void FreeObject(void* ptr)` | 置回空闲位；`AM_DCHECK` 检出 double-free；回退 `scan_cursor` | ✅ |
 | `SpanList::insert/erase/push_front/push_back/pop_front` | 静态/成员 | 循环哨兵免空分支；不持有元数据 | ✅ |
 | `PageMap::GetSpan` | `static Span* (size_t page_id / void* ptr)` | 无锁；未映射返回 null；`ptr` 版本右移页偏移 | ✅ |
-| `PageMap::SetSpan` | `static void (Span* span)` | `@pre` 分片锁已持；按连续段批量 release store | ❌ |
+| `PageMap::EnsureRange` | `static bool (size_t start, size_t pages) noexcept` | structural growth；OOM 返回 false，不发布任何 Span leaf；已链接中间节点只增不减并可复用 | ❌ |
+| `PageMap::SetSpan` | `static void (Span* span) noexcept` | `@pre` 分片锁已持且 `EnsureRange` 已成功（或 path 已存在）；按连续段批量 release store，不分配 | ❌ |
 | `PageMap::ClearRange` | `static void (size_t start, size_t page_num)` | `@pre` 分片锁已持；空子树整块跳过 | ❌ |
 | `PageMap::Reset` | `static void Reset()` | `@pre` 所有用户静止；root 置空 + 池回收 | ❌ |
 
@@ -86,12 +87,14 @@ i1/i2/i3 各取 9 bit；逐层 acquire load，任一空层返回 null。
 
 ### 6.4 PageMap 写入
 
-- `SetSpan`：逐页段索引；中间节点缺失时经 `ObjectPool` 懒分配并以 release store 挂载，叶子批量 store。
+- `EnsureRange`：逐页段确认三级中间节点。发现缺失 path 时才获取 structural mutex；任一 `TryNew` OOM 返回 false。已经安装的节点保留在只增 radix tree 中，但在成功前绝不写 Span leaf。
+- `SetSpan`：只查找已建立的 path 并批量写 leaf。path 缺失表示 PageCache 发布协议被破坏，使用 allocation-free fatal diagnostic fail-fast。
 - `ClearRange`：按页段清除叶子；遇到空子树按该层覆盖跨度整体跳过（O(子树跨度) 变 O(层数)）。
 
 ## 7. 边界条件与错误处理
 
 - `page_id` 越界（`i0 >= RADIX_ROOT_SIZE`）→ `GetSpan` 返回 null（对未知地址的释放被 `am_free` 忽略）。
+- radix metadata OOM → `EnsureRange` 返回 false；PageCache 在 leaf publication 前回收新 Span metadata 与 system mapping，向上返回 `nullptr`。
 - `FreeObject` 越界/错位指针：`AM_HCHECK` 下溢、对齐与溢出检查（debug 构建及 `AM_HARDENED` release 崩溃，其余 release 交由调用契约）。
 - `Init` 时容量为 0（对齐开销超过页区）：`AllocObject` 恒 null，该 Span 不被分配使用。
 
@@ -112,3 +115,4 @@ i1/i2/i3 各取 9 bit；逐层 acquire load，任一空层返回 null。
 |---|---|---|---|
 | 2026-08-19 | 初版（由架构总览 §4/§5.3/§5.6 拆分扩展） | 文档系统落地 | — |
 | 2026-08-26 | 明确 `use_count` 为 bitmap 外对象数及归还门禁语义 | span.h 注释与 improvement-plan 04 语义对齐 | — |
+| 2026-08-28 | PageMap 拆分 `EnsureRange` 与 no-throw `SetSpan`，structural growth 独立同步 | metadata OOM 不再在 `noexcept` 边界 terminate，禁止 partial leaf publication | S-2 |

@@ -293,8 +293,46 @@ TEST_F(PageCacheTest, ClearRangeAfterUnmapMakesLookupNull) {
     EXPECT_EQ(PageMap::GetSpan(start), nullptr);
     EXPECT_EQ(PageMap::GetSpan(start + 4), nullptr);
 
+    ASSERT_TRUE(PageMap::EnsureRange(span->start_page_idx, span->page_num));
     PageMap::SetSpan(span);
     EXPECT_EQ(PageMap::GetSpan(start), span);
+    cache_.ReleaseSpan(span);
+}
+
+TEST_F(PageCacheTest, EnsureRangeFailureLeavesSpanLeafUnpublished) {
+    constexpr size_t kPageId = 123456;
+    for (size_t successful_allocations = 0; successful_allocations < 3;
+         ++successful_allocations) {
+        cache_.Reset();
+        PageMap::SetRadixAllocationFailureForTest(successful_allocations);
+
+        EXPECT_FALSE(PageMap::EnsureRange(kPageId, 1));
+        EXPECT_EQ(PageMap::GetSpan(kPageId), nullptr);
+    }
+
+    PageMap::SetRadixAllocationFailureForTest(std::numeric_limits<size_t>::max());
+    ASSERT_TRUE(PageMap::EnsureRange(kPageId, 1));
+    Span span{kPageId, 1};
+    PageMap::SetSpan(&span);
+    EXPECT_EQ(PageMap::GetSpan(kPageId), &span);
+    PageMap::ClearRange(kPageId, 1);
+}
+
+TEST_F(PageCacheTest, FreshSpanRollsBackWhenPageMapMetadataOom) {
+    PageAllocator::ResetStats();
+    PageMap::SetRadixAllocationFailureForTest(0);
+
+    EXPECT_EQ(cache_.AllocSpan(1), nullptr);
+    const auto& stats = PageAllocator::GetStats();
+    // One mapping backs Span metadata and remains pool-owned for reuse; the
+    // second is the fresh 128-page Span mapping and must be rolled back.
+    EXPECT_EQ(stats.normal_alloc_success.load(std::memory_order_relaxed), 2u);
+    EXPECT_EQ(stats.free_count.load(std::memory_order_relaxed), 1u);
+
+    PageMap::SetRadixAllocationFailureForTest(std::numeric_limits<size_t>::max());
+    Span* span = cache_.AllocSpan(1);
+    ASSERT_NE(span, nullptr);
+    EXPECT_EQ(PageMap::GetSpan(span->GetPageBaseAddr()), span);
     cache_.ReleaseSpan(span);
 }
 

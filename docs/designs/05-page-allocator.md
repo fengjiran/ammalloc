@@ -29,6 +29,15 @@
 | **系统调用优化** | 减少 50% | 通过缓存和乐观策略减少 mmap/munmap |
 | **零递归** | 严格保证 | 不能触发 malloc 递归（避免死锁） |
 
+PageAllocator、ObjectPool、PageMap 和 PageCache 的核心错误路径不使用
+`spdlog`、iostream 或格式化。预期资源不足通过 `nullptr` 返回；无法继续
+信任同步或 metadata invariant 时，仅使用 `write(2)` + `abort()` 的
+allocation-free fatal diagnostic。同步统一使用保证 `noexcept` 的
+`detail::NoThrowLockGuard` / `detail::NoThrowUniqueLock`。
+`python3 scripts/verify_allocator_core.py` 防止这些核心文件重新引入
+`spdlog`、会抛出 `bad_alloc` 的 metadata pool API，或可能抛出
+`std::system_error` 的 `std::lock_guard` / `std::unique_lock`。
+
 ---
 
 ## 2. 核心算法设计

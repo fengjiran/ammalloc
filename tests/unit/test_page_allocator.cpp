@@ -14,6 +14,10 @@
 namespace {
 using namespace ammalloc;
 
+struct PooledTestNode {
+    PooledTestNode* next{nullptr};
+};
+
 class PageAllocatorTest : public ::testing::Test {
 public:
     void SetUp() override {
@@ -164,6 +168,18 @@ TEST_F(PageAllocatorTest, BoundaryConditions) {
 
     // 清理
     PageAllocator::SystemFree(ptr2, 1);
+}
+
+TEST_F(PageAllocatorTest, ObjectPoolTryNewReturnsNullOnBackingOom) {
+    ObjectPool<PooledTestNode> pool;
+    g_mock_normal_alloc_fail.store(true, std::memory_order_relaxed);
+
+    EXPECT_EQ(pool.TryNew(), nullptr);
+
+    g_mock_normal_alloc_fail.store(false, std::memory_order_relaxed);
+    auto* node = pool.TryNew();
+    ASSERT_NE(node, nullptr);
+    pool.Delete(node);
 }
 
 // ========== 测试套件：线程安全测试 ==========

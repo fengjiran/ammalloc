@@ -7,7 +7,7 @@
 #include "ammalloc/thread_cache.h"
 
 #include <atomic>
-#include <spdlog/spdlog.h>
+#include <exception>
 
 namespace {
 
@@ -19,7 +19,7 @@ __attribute__((tls_model("initial-exec")))
 thread_local ThreadCache* pTLSThreadCache = nullptr;
 thread_local bool g_ThreadCacheAlreadyDestructed = false;
 
-ThreadCache* CreateThreadCache() {
+ThreadCache* CreateThreadCache() noexcept {
     if (g_ThreadCacheAlreadyDestructed) {
         return nullptr;
     }
@@ -40,7 +40,7 @@ ThreadCache* CreateThreadCache() {
     return new (ptr) ThreadCache;
 }
 
-void ReleaseThreadCache(ThreadCache* tc) {
+void ReleaseThreadCache(ThreadCache* tc) noexcept {
     if (!tc) {
         return;
     }
@@ -79,19 +79,20 @@ void EnsureScavengerStarted() noexcept {
                                             std::memory_order_acq_rel)) {
             try {
                 PageHeapScavenger::GetInstance().Start();
-            } catch (const std::exception& e) {
+            } catch (const std::exception&) {
                 // Allocation remains functional without proactive RSS reclamation.
-                // Keep `started` set so failure cannot create retry storms.
-                spdlog::warn("Failed to start PageHeapScavenger: {}. Continuing without background GC.", e.what());
+                // Keep `started` set so failure cannot create retry storms. No
+                // generic logger is safe on this allocator slow path.
             } catch (...) {
-                spdlog::error("Unknown exception while starting PageHeapScavenger.");
+                // Background reclamation is optional. Unknown failures must not
+                // escape this noexcept allocation boundary either.
             }
         }
     }
     // clang-format on
 }
 
-AM_NOINLINE void* am_malloc_slow_path(size_t original_size) {
+AM_NOINLINE void* am_malloc_slow_path(size_t original_size) noexcept {
     // Defer scavenger thread creation until allocation is already on a slow path,
     // avoiding process-startup cost when ammalloc is never used.
     EnsureScavengerStarted();
@@ -117,7 +118,8 @@ AM_NOINLINE void* am_malloc_slow_path(size_t original_size) {
     return pTLSThreadCache->Allocate(original_size);
 }
 
-AM_NOINLINE void am_free_slow_path(void* ptr, Span* span, size_t aligned_size, size_t idx) {
+AM_NOINLINE void am_free_slow_path(void* ptr, Span* span, size_t aligned_size,
+                                   size_t idx) noexcept {
     // Large-object Spans do not carry an object size and return directly to PageCache.
     if (aligned_size == 0) {
         AM_HCHECK(ptr == span->GetPageBaseAddr(), "Invalid large-object pointer.");

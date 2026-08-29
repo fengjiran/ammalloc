@@ -3,7 +3,7 @@
 
 namespace ammalloc {
 
-void Span::Init(size_t aligned_object_size) {
+void Span::Init(size_t aligned_object_size) noexcept {
     // Creation-time invariant, active in every build: a Span may only carve an
     // exact size-class grid, so free-time slot math and bucket indexing always
     // agree. Abort here rather than carving a misaligned grid.
@@ -51,7 +51,7 @@ void Span::Init(size_t aligned_object_size) {
     scan_cursor = 0;
 }
 
-void* Span::AllocObject() {
+void* Span::AllocObject() noexcept {
     // clang-format off
     if (use_count >= capacity) AM_UNLIKELY {
         return nullptr;
@@ -78,7 +78,7 @@ void* Span::AllocObject() {
     // clang-format on
 }
 
-void Span::FreeObject(void* ptr) {
+void Span::FreeObject(void* ptr) noexcept {
     // Use uintptr_t arithmetic so an arbitrary caller pointer does not trigger
     // undefined pointer subtraction before the range check can run.
     const auto base = reinterpret_cast<uintptr_t>(GetDataBasePtr());

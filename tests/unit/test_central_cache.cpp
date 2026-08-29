@@ -192,6 +192,23 @@ TEST_F(CentralCacheTest, Reset) {
     central_cache_.ReleaseListToSpans(head, obj_size);
 }
 
+TEST_F(CentralCacheTest, TransferCacheOomDegradesToSpanList) {
+    // Release the existing backing before enabling the system-allocation hook;
+    // Reset then exercises the same no-abort initialization path used by the
+    // singleton constructor when backing allocation is unavailable.
+    central_cache_.Reset();
+    page_cache_.Reset();
+    g_mock_normal_alloc_fail.store(true, std::memory_order_relaxed);
+    EXPECT_NO_THROW(central_cache_.Reset());
+    g_mock_normal_alloc_fail.store(false, std::memory_order_relaxed);
+
+    FreeList list;
+    ASSERT_GT(central_cache_.FetchRange(list, 1, 64), 0u);
+    void* object = list.pop();
+    static_cast<FreeBlock*>(object)->next = nullptr;
+    central_cache_.ReleaseListToSpans(object, 64);
+}
+
 // 测试点 7: 对象归还后再次分配
 TEST_F(CentralCacheTest, ReallocateAfterRelease) {
     FreeList list;

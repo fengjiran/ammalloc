@@ -4,12 +4,12 @@
 
 namespace ammalloc {
 
-uint64_t GetCurrentTimeMs() {
+uint64_t GetCurrentTimeMs() noexcept {
     auto now = std::chrono::steady_clock::now();
     return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 }
 
-Span* PageMap::GetSpan(size_t page_id) {
+Span* PageMap::GetSpan(size_t page_id) noexcept {
     // clang-format off
     // Acquire semantics ensure we see the initialized data of the root node
     // if it was just created by another thread.
@@ -47,57 +47,161 @@ Span* PageMap::GetSpan(size_t page_id) {
     // clang-format on
 }
 
-void PageMap::SetSpan(Span* span) {
-    auto* curr = root_.load(std::memory_order_relaxed);
-    if (!curr) {
-        curr = &root_storage_;
-        for (auto& child: curr->children) {
-            child.store(nullptr, std::memory_order_relaxed);
-        }
-        AM_DCHECK((reinterpret_cast<uintptr_t>(curr) & (4096 - 1)) == 0);
-        root_.store(curr, std::memory_order_release);
+bool PageMap::HasPath(size_t page_id) noexcept {
+    auto* root = root_.load(std::memory_order_acquire);
+    if (!root) {
+        return false;
     }
 
-    auto start = span->start_page_idx;
-    const auto end = start + span->page_num;
+    const size_t i0 = page_id >> (PageConfig::RADIX_NODE_BITS * 3);
+    if (i0 >= PageConfig::RADIX_ROOT_SIZE) {
+        return false;
+    }
+    const size_t i1 = (page_id >> (PageConfig::RADIX_NODE_BITS * 2)) & PageConfig::RADIX_MASK;
+    const size_t i2 = (page_id >> PageConfig::RADIX_NODE_BITS) & PageConfig::RADIX_MASK;
+    auto* p1 = static_cast<RadixNode*>(root->children[i0].load(std::memory_order_acquire));
+    if (!p1) {
+        return false;
+    }
+    auto* p2 = static_cast<RadixNode*>(p1->children[i1].load(std::memory_order_acquire));
+    if (!p2) {
+        return false;
+    }
+    return p2->children[i2].load(std::memory_order_acquire) != nullptr;
+}
 
-    while (start < end) {
-        // Lazily allocate radix nodes only on the PageMap write path.
-        const size_t i0 = start >> (PageConfig::RADIX_NODE_BITS * 3);
-        const size_t i1 = (start >> (PageConfig::RADIX_NODE_BITS * 2)) & PageConfig::RADIX_MASK;
-        const size_t i2 = (start >> PageConfig::RADIX_NODE_BITS) & PageConfig::RADIX_MASK;
-        const size_t i3 = start & PageConfig::RADIX_MASK;
+RadixNode* PageMap::TryNewRadixNode() noexcept {
+#ifdef AMMALLOC_TEST
+    size_t remaining = radix_allocations_before_failure_.load(std::memory_order_relaxed);
+    while (remaining != std::numeric_limits<size_t>::max()) {
+        if (remaining == 0) {
+            return nullptr;
+        }
+        if (radix_allocations_before_failure_.compare_exchange_weak(
+                    remaining, remaining - 1, std::memory_order_relaxed,
+                    std::memory_order_relaxed)) {
+            break;
+        }
+    }
+#endif
+    return radix_node_pool_.TryNew();
+}
 
-        auto* p1 = static_cast<RadixNode*>(curr->children[i0].load(std::memory_order_relaxed));
+bool PageMap::EnsurePathLocked(size_t page_id) noexcept {
+    const size_t i0 = page_id >> (PageConfig::RADIX_NODE_BITS * 3);
+    if (i0 >= PageConfig::RADIX_ROOT_SIZE) {
+        return false;
+    }
+    const size_t i1 = (page_id >> (PageConfig::RADIX_NODE_BITS * 2)) & PageConfig::RADIX_MASK;
+    const size_t i2 = (page_id >> PageConfig::RADIX_NODE_BITS) & PageConfig::RADIX_MASK;
+
+    auto* root = root_.load(std::memory_order_relaxed);
+    if (!root) {
+        root = &root_storage_;
+        for (auto& child: root->children) {
+            child.store(nullptr, std::memory_order_relaxed);
+        }
+        root_.store(root, std::memory_order_release);
+    }
+
+    auto* p1 = static_cast<RadixNode*>(root->children[i0].load(std::memory_order_relaxed));
+    if (!p1) {
+        p1 = TryNewRadixNode();
         if (!p1) {
-            p1 = radix_node_pool_.New();
-            AM_DCHECK((reinterpret_cast<uintptr_t>(p1) & (4096 - 1)) == 0);
-            curr->children[i0].store(p1, std::memory_order_release);
+            return false;
         }
+        root->children[i0].store(p1, std::memory_order_release);
+    }
 
-        auto* p2 = static_cast<RadixNode*>(p1->children[i1].load(std::memory_order_relaxed));
+    auto* p2 = static_cast<RadixNode*>(p1->children[i1].load(std::memory_order_relaxed));
+    if (!p2) {
+        p2 = TryNewRadixNode();
         if (!p2) {
-            p2 = radix_node_pool_.New();
-            AM_DCHECK((reinterpret_cast<uintptr_t>(p2) & (4096 - 1)) == 0);
-            p1->children[i1].store(p2, std::memory_order_release);
+            return false;
         }
+        p1->children[i1].store(p2, std::memory_order_release);
+    }
 
-        auto* p3 = static_cast<RadixNode*>(p2->children[i2].load(std::memory_order_relaxed));
+    auto* p3 = static_cast<RadixNode*>(p2->children[i2].load(std::memory_order_relaxed));
+    if (!p3) {
+        p3 = TryNewRadixNode();
         if (!p3) {
-            p3 = radix_node_pool_.New();
-            AM_DCHECK((reinterpret_cast<uintptr_t>(p3) & (4096 - 1)) == 0);
-            p2->children[i2].store(p3, std::memory_order_release);
+            return false;
+        }
+        p2->children[i2].store(p3, std::memory_order_release);
+    }
+    return true;
+}
+
+bool PageMap::EnsureRange(size_t start_page_id, size_t page_num) noexcept {
+    if (page_num == 0) {
+        return true;
+    }
+    if (page_num > 1 &&
+        start_page_id > std::numeric_limits<size_t>::max() - (page_num - 1)) {
+        return false;
+    }
+
+    size_t current = start_page_id;
+    size_t remaining = page_num;
+    while (remaining > 0) {
+        const size_t i0 = current >> (PageConfig::RADIX_NODE_BITS * 3);
+        if (i0 >= PageConfig::RADIX_ROOT_SIZE) {
+            return false;
+        }
+        const size_t i3 = current & PageConfig::RADIX_MASK;
+        const size_t step = std::min(remaining, PageConfig::RADIX_NODE_SIZE - i3);
+        if (!HasPath(current)) {
+            detail::NoThrowLockGuard lock(structure_mutex_);
+            if (!EnsurePathLocked(current)) {
+                return false;
+            }
+        }
+        current += step;
+        remaining -= step;
+    }
+    return true;
+}
+
+void PageMap::SetSpan(Span* span) noexcept {
+    if (!span || span->page_num == 0) {
+        detail::FatalNoAlloc("PageMap::SetSpan received invalid Span");
+    }
+
+    auto* root = root_.load(std::memory_order_acquire);
+    if (!root) {
+        detail::FatalNoAlloc("PageMap::SetSpan path was not prepared");
+    }
+
+    size_t current = span->start_page_idx;
+    size_t remaining = span->page_num;
+    while (remaining > 0) {
+        const size_t i0 = current >> (PageConfig::RADIX_NODE_BITS * 3);
+        if (i0 >= PageConfig::RADIX_ROOT_SIZE) {
+            detail::FatalNoAlloc("PageMap::SetSpan page ID is out of range");
+        }
+        const size_t i1 = (current >> (PageConfig::RADIX_NODE_BITS * 2)) & PageConfig::RADIX_MASK;
+        const size_t i2 = (current >> PageConfig::RADIX_NODE_BITS) & PageConfig::RADIX_MASK;
+        const size_t i3 = current & PageConfig::RADIX_MASK;
+        auto* p1 = static_cast<RadixNode*>(root->children[i0].load(std::memory_order_acquire));
+        auto* p2 = p1 ? static_cast<RadixNode*>(p1->children[i1].load(std::memory_order_acquire))
+                      : nullptr;
+        auto* p3 = p2 ? static_cast<RadixNode*>(p2->children[i2].load(std::memory_order_acquire))
+                      : nullptr;
+        if (!p3) {
+            detail::FatalNoAlloc("PageMap::SetSpan path was not prepared");
         }
 
-        size_t cnt = std::min<size_t>(end - start, PageConfig::RADIX_NODE_SIZE - i3);
-        for (size_t k = 0; k < cnt; ++k) {
-            p3->children[i3 + k].store(span, std::memory_order_release);
+        const size_t count = std::min(remaining, PageConfig::RADIX_NODE_SIZE - i3);
+        for (size_t i = 0; i < count; ++i) {
+            p3->children[i3 + i].store(span, std::memory_order_release);
         }
-        start += cnt;
+        current += count;
+        remaining -= count;
     }
 }
 
-void PageMap::ClearRange(size_t start_page_id, size_t page_num) {
+void PageMap::ClearRange(size_t start_page_id, size_t page_num) noexcept {
     auto* curr = root_.load(std::memory_order_relaxed);
     if (!curr) {
         return;
@@ -108,6 +212,9 @@ void PageMap::ClearRange(size_t start_page_id, size_t page_num) {
 
     while (remaining_pages > 0) {
         const size_t i0 = cur_page_id >> (PageConfig::RADIX_NODE_BITS * 3);
+        if (i0 >= PageConfig::RADIX_ROOT_SIZE) {
+            return;
+        }
         auto* p1 = static_cast<RadixNode*>(curr->children[i0].load(std::memory_order_relaxed));
         if (!p1) {
             constexpr size_t l0_coverage = 1ULL << (PageConfig::RADIX_NODE_BITS * 3);
@@ -151,12 +258,17 @@ void PageMap::ClearRange(size_t start_page_id, size_t page_num) {
     }
 }
 
-void PageMap::Reset() {
+void PageMap::Reset() noexcept {
+    detail::NoThrowLockGuard lock(structure_mutex_);
     root_.store(nullptr, std::memory_order_relaxed);
     radix_node_pool_.ReleaseMemory();
+#ifdef AMMALLOC_TEST
+    radix_allocations_before_failure_.store(std::numeric_limits<size_t>::max(),
+                                            std::memory_order_relaxed);
+#endif
 }
 
-Span* PageCacheShard::AllocSpanLocked(size_t page_num) {
+Span* PageCacheShard::AllocSpanLocked(size_t page_num) noexcept {
     // clang-format off
     if (page_num == 0 || page_num > std::numeric_limits<uint32_t>::max()) AM_UNLIKELY {
         return nullptr;
@@ -170,10 +282,13 @@ Span* PageCacheShard::AllocSpanLocked(size_t page_num) {
                 return nullptr;
             }
 
-            Span* span = nullptr;
-            try {
-                span = span_pool_.New(detail::PtrToPageId(ptr), static_cast<uint32_t>(page_num));
-            } catch (const std::bad_alloc&) {
+            Span* span = span_pool_.TryNew(detail::PtrToPageId(ptr), static_cast<uint32_t>(page_num));
+            if (!span) {
+                PageAllocator::SystemFree(ptr, page_num);
+                return nullptr;
+            }
+            if (!PageMap::EnsureRange(span->start_page_idx, span->page_num)) {
+                span_pool_.Delete(span);
                 PageAllocator::SystemFree(ptr, page_num);
                 return nullptr;
             }
@@ -204,10 +319,9 @@ Span* PageCacheShard::AllocSpanLocked(size_t page_num) {
             AM_DCHECK(big_span != nullptr);
             AM_DCHECK(big_span->page_num == i);
             AM_DCHECK(!big_span->IsUsed());
-            Span* small_span = nullptr;
-            try {
-                small_span = span_pool_.New(big_span->start_page_idx, static_cast<uint32_t>(page_num));
-            } catch (const std::bad_alloc&) {
+            Span* small_span =
+                    span_pool_.TryNew(big_span->start_page_idx, static_cast<uint32_t>(page_num));
+            if (!small_span) {
                 // Preserve the original free Span if metadata allocation fails.
                 span_lists_[i].push_front(big_span);
                 return nullptr;
@@ -235,10 +349,14 @@ Span* PageCacheShard::AllocSpanLocked(size_t page_num) {
             return nullptr;
         }
 
-        Span* span = nullptr;
-        try {
-            span = span_pool_.New(detail::PtrToPageId(ptr), static_cast<uint32_t>(alloc_page_nums));
-        } catch (const std::bad_alloc&) {
+        Span* span = span_pool_.TryNew(detail::PtrToPageId(ptr),
+                                       static_cast<uint32_t>(alloc_page_nums));
+        if (!span) {
+            PageAllocator::SystemFree(ptr, alloc_page_nums);
+            return nullptr;
+        }
+        if (!PageMap::EnsureRange(span->start_page_idx, span->page_num)) {
+            span_pool_.Delete(span);
             PageAllocator::SystemFree(ptr, alloc_page_nums);
             return nullptr;
         }
@@ -310,7 +428,7 @@ void PageCacheShard::ReleaseSpanLocked(Span* span) noexcept {
     PageMap::SetSpan(span);
 }
 
-void PageCacheShard::ResetLocked() {
+void PageCacheShard::ResetLocked() noexcept {
     for (auto& list: span_lists_) {
         while (!list.empty()) {
             auto* span = list.pop_front();
@@ -320,14 +438,13 @@ void PageCacheShard::ResetLocked() {
         }
     }
     span_pool_.ReleaseMemory();
-    PageMap::Reset();
 }
 
 #ifdef USE_PAGECACHE_SHARD
-Span* PageCache::AllocSpan(size_t page_num) {
+Span* PageCache::AllocSpan(size_t page_num) noexcept {
     const uint16_t shard_id = SelectShardForAlloc(page_num);
     auto& shard = GetShard(shard_id);
-    std::lock_guard<std::mutex> lock(shard.GetMutex());
+    detail::NoThrowLockGuard lock(shard.GetMutex());
     auto* span = shard.AllocSpanLocked(page_num);
     if (span) {
         span->owner_shard_id = shard_id;
@@ -338,21 +455,21 @@ Span* PageCache::AllocSpan(size_t page_num) {
 void PageCache::ReleaseSpan(Span* span) noexcept {
     AM_DCHECK(span != nullptr);
     auto& shard = OwnerShard(span);
-    std::lock_guard<std::mutex> lock(shard.GetMutex());
+    detail::NoThrowLockGuard lock(shard.GetMutex());
     shard.ReleaseSpanLocked(span);
 }
 
-void PageCache::Reset() {
+void PageCache::Reset() noexcept {
     for (uint16_t i = 0; i < active_shard_count_; ++i) {
         auto& shard = shards_[i];
-        std::lock_guard<std::mutex> lock(shard.GetMutex());
+        detail::NoThrowLockGuard lock(shard.GetMutex());
         shard.ResetLocked();
     }
     PageMap::Reset();
 }
 #else
 
-Span* PageCache::AllocSpanLocked(size_t page_num) {
+Span* PageCache::AllocSpanLocked(size_t page_num) noexcept {
     if (page_num > std::numeric_limits<uint32_t>::max()) {
         return nullptr;
     }
@@ -366,10 +483,14 @@ Span* PageCache::AllocSpanLocked(size_t page_num) {
                 return nullptr;
             }
 
-            Span* span = nullptr;
-            try {
-                span = span_pool_.New(detail::PtrToPageId(ptr), page_num);
-            } catch (const std::bad_alloc&) {
+            Span* span = span_pool_.TryNew(detail::PtrToPageId(ptr),
+                                           static_cast<uint32_t>(page_num));
+            if (!span) {
+                PageAllocator::SystemFree(ptr, page_num);
+                return nullptr;
+            }
+            if (!PageMap::EnsureRange(span->start_page_idx, span->page_num)) {
+                span_pool_.Delete(span);
                 PageAllocator::SystemFree(ptr, page_num);
                 return nullptr;
             }
@@ -397,10 +518,9 @@ Span* PageCache::AllocSpanLocked(size_t page_num) {
             }
 
             auto* big_span = span_lists_[i].pop_front();
-            Span* small_span = nullptr;
-            try {
-                small_span = span_pool_.New(big_span->start_page_idx, page_num);
-            } catch (const std::bad_alloc&) {
+            Span* small_span = span_pool_.TryNew(big_span->start_page_idx,
+                                                 static_cast<uint32_t>(page_num));
+            if (!small_span) {
                 // Preserve the original free Span if metadata allocation fails.
                 span_lists_[i].push_front(big_span);
                 return nullptr;
@@ -426,11 +546,14 @@ Span* PageCache::AllocSpanLocked(size_t page_num) {
             return nullptr;
         }
 
-        Span* span = nullptr;
-        try {
-            span = span_pool_.New(reinterpret_cast<uintptr_t>(ptr) >> SystemConfig::PAGE_SHIFT,
-                                  alloc_page_nums);
-        } catch (const std::bad_alloc&) {
+        Span* span = span_pool_.TryNew(detail::PtrToPageId(ptr),
+                                       static_cast<uint32_t>(alloc_page_nums));
+        if (!span) {
+            PageAllocator::SystemFree(ptr, alloc_page_nums);
+            return nullptr;
+        }
+        if (!PageMap::EnsureRange(span->start_page_idx, span->page_num)) {
+            span_pool_.Delete(span);
             PageAllocator::SystemFree(ptr, alloc_page_nums);
             return nullptr;
         }
@@ -443,7 +566,7 @@ Span* PageCache::AllocSpanLocked(size_t page_num) {
 }
 
 void PageCache::ReleaseSpan(Span* span) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    detail::NoThrowLockGuard lock(mutex_);
 
     // Oversized Spans are never retained in page-count buckets.
     // clang-format off
@@ -503,8 +626,8 @@ void PageCache::ReleaseSpan(Span* span) noexcept {
     PageMap::SetSpan(span);
 }
 
-void PageCache::Reset() {
-    std::lock_guard<std::mutex> lock(mutex_);
+void PageCache::Reset() noexcept {
+    detail::NoThrowLockGuard lock(mutex_);
     for (auto& list: span_lists_) {
         while (!list.empty()) {
             auto* span = list.pop_front();

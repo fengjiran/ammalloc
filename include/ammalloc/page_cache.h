@@ -13,6 +13,7 @@
 
 #include "ammalloc/assert.h"
 #include "ammalloc/attributes.h"
+#include "ammalloc/noalloc_diagnostics.h"
 #include "ammalloc/page_allocator.h"
 #include "ammalloc/span.h"
 
@@ -22,14 +23,14 @@ namespace ammalloc {
 
 /// @brief Returns a monotonic timestamp for Span idle-time accounting.
 /// @return Milliseconds elapsed on `std::chrono::steady_clock`'s epoch.
-uint64_t GetCurrentTimeMs();
+uint64_t GetCurrentTimeMs() noexcept;
 
 /// @brief Stores the wide root level of the PageMap radix tree.
 /// @note Page alignment preserves the fixed page-sized node layout.
 struct alignas(SystemConfig::PAGE_SIZE) RadixRootNode {
     std::array<std::atomic<void*>, PageConfig::RADIX_ROOT_SIZE> children;
 
-    RadixRootNode() {
+    RadixRootNode() noexcept {
         for (auto& child: children) {
             child.store(nullptr, std::memory_order_relaxed);
         }
@@ -41,7 +42,7 @@ struct alignas(SystemConfig::PAGE_SIZE) RadixRootNode {
 struct alignas(SystemConfig::PAGE_SIZE) RadixNode {
     std::array<std::atomic<void*>, PageConfig::RADIX_NODE_SIZE> children;
 
-    RadixNode() {
+    RadixNode() noexcept {
         for (auto& child: children) {
             child.store(nullptr, std::memory_order_relaxed);
         }
@@ -59,35 +60,72 @@ public:
     /// @param page_id Global page index.
     /// @return Borrowed Span pointer, or null when the page is not mapped.
     /// @note Acquire loads pair with release stores in `SetSpan`.
-    static Span* GetSpan(size_t page_id);
+    static Span* GetSpan(size_t page_id) noexcept;
 
     /// @brief Looks up the Span managing an address without acquiring a lock.
     /// @param ptr Address to locate.
     /// @return Borrowed Span pointer, or null when the address is not mapped.
-    static Span* GetSpan(void* ptr) {
+    static Span* GetSpan(void* ptr) noexcept {
         return GetSpan(reinterpret_cast<uintptr_t>(ptr) >> SystemConfig::PAGE_SHIFT);
     }
 
-    /// @brief Maps every page in a Span to that Span.
+    /// @brief Ensures every radix path needed by a page range exists.
+    /// @param start_page_id First page index in the range.
+    /// @param page_num Number of consecutive pages.
+    /// @return False when radix metadata allocation fails; no Span leaf is
+    ///         published on failure. Already attached internal nodes remain
+    ///         owned by the PageMap and may be reused later.
+    /// @note GetSpan remains lock-free. Structural growth is serialized only
+    ///       when a missing node is observed, so independent PageCache shards
+    ///       cannot publish competing paths.
+    static bool EnsureRange(size_t start_page_id, size_t page_num) noexcept;
+
+    /// @brief Maps every page in a Span to that Span without allocating.
     /// @param span Span to publish.
     /// @pre `span` is non-null and the owning PageCache shard lock is held.
-    static void SetSpan(Span* span);
+    /// @pre EnsureRange(span->start_page_idx, span->page_num) succeeded, or
+    ///      the range was already mapped before a split/coalesce remap.
+    static void SetSpan(Span* span) noexcept;
 
     /// @brief Clears mappings for a half-open page range.
     /// @param start_page_id First page index to clear.
     /// @param page_num Number of consecutive pages to clear.
     /// @pre The owning PageCache shard lock is held.
-    static void ClearRange(size_t start_page_id, size_t page_num);
+    static void ClearRange(size_t start_page_id, size_t page_num) noexcept;
 
     /// @brief Clears the radix root and releases pooled internal nodes.
     /// @pre All allocator users are quiescent and the caller serializes this reset.
-    static void Reset();
+    static void Reset() noexcept;
+
+#ifdef AMMALLOC_TEST
+    /// @brief Fails RadixNode allocation after the requested number of successes.
+    /// @param successful_allocations Number of node allocations to permit, or
+    ///        `SIZE_MAX` to disable fault injection.
+    /// @pre Allocator users are quiescent.
+    static void SetRadixAllocationFailureForTest(size_t successful_allocations) noexcept {
+        radix_allocations_before_failure_.store(successful_allocations,
+                                                std::memory_order_relaxed);
+    }
+#endif
 
 private:
+    static bool HasPath(size_t page_id) noexcept;
+    static bool EnsurePathLocked(size_t page_id) noexcept;
+    static RadixNode* TryNewRadixNode() noexcept;
+
     // Published with release semantics once initialized.
     inline static std::atomic<RadixRootNode*> root_ = nullptr;
     inline static RadixRootNode root_storage_{};
     inline static ObjectPool<RadixNode> radix_node_pool_{};
+    /// Protects root initialization, monotonically growing node links, and every
+    /// mutation of the process-wide `radix_node_pool_`. The pool itself does not
+    /// lock, and it is shared by all shards, so this mutex is the only thing
+    /// serializing its free list and bump pointer.
+    inline static std::mutex structure_mutex_{};
+#ifdef AMMALLOC_TEST
+    inline static std::atomic<size_t> radix_allocations_before_failure_{
+            std::numeric_limits<size_t>::max()};
+#endif
 };
 
 #ifdef AMMALLOC_TEST
@@ -142,7 +180,7 @@ private:
     /// @param page_num Requested number of pages.
     /// @return Owned-shard Span borrowed by the caller, or null on failure.
     /// @pre `mutex_` is held by the calling thread.
-    Span* AllocSpanLocked(size_t page_num);
+    Span* AllocSpanLocked(size_t page_num) noexcept;
 
     /// @brief Releases and coalesces a Span while the shard mutex is held.
     /// @param span Span owned by this shard.
@@ -151,7 +189,7 @@ private:
 
     /// @brief Releases all free spans and pooled metadata owned by this shard.
     /// @pre `mutex_` is held and allocator users are quiescent.
-    void ResetLocked();
+    void ResetLocked() noexcept;
 
     friend class PageCache;
     PAGE_CACHE_FRIENDS_TEST;
@@ -182,7 +220,7 @@ public:
     /// @brief Allocates a Span containing `page_num` pages.
     /// @param page_num Required page count.
     /// @return Borrowed Span metadata owned by its selected shard, or null on failure.
-    Span* AllocSpan(size_t page_num);
+    Span* AllocSpan(size_t page_num) noexcept;
 
     /// @brief Returns a Span to its recorded owner shard for coalescing.
     /// @param span Span previously returned by `AllocSpan`.
@@ -191,7 +229,7 @@ public:
 
     /// @brief Releases free state from all active shards and resets PageMap.
     /// @pre All allocator users are quiescent; intended for test isolation.
-    void Reset();
+    void Reset() noexcept;
 
     /// @brief Reports whether one shard's page-count bucket is empty.
     /// @param shard_id Active shard index.
@@ -327,8 +365,8 @@ public:
     /// @brief Allocates a Span containing `page_num` pages.
     /// @param page_num Required page count.
     /// @return The allocated span, or nullptr if system allocation fails.
-    Span* AllocSpan(size_t page_num) {
-        std::lock_guard<std::mutex> lock(mutex_);
+    Span* AllocSpan(size_t page_num) noexcept {
+        detail::NoThrowLockGuard lock(mutex_);
         return AllocSpanLocked(page_num);
     }
 
@@ -339,7 +377,7 @@ public:
 
     /// @brief Clears all free spans and resets PageMap for test isolation.
     /// @pre All allocator users are quiescent.
-    void Reset();
+    void Reset() noexcept;
 
     AM_NODISCARD bool IsBucketEmpty(size_t bucket_idx) const noexcept {
         AM_DCHECK(bucket_idx < span_lists_.size());
@@ -368,7 +406,7 @@ private:
     /// @param page_num Required page count.
     /// @return Allocated Span, or null on failure.
     /// @pre `mutex_` is held by the caller.
-    Span* AllocSpanLocked(size_t page_num);
+    Span* AllocSpanLocked(size_t page_num) noexcept;
 
     PAGE_CACHE_FRIENDS_TEST;
     friend class PageHeapScavenger;

@@ -108,17 +108,17 @@ struct alignas(SystemConfig::CACHE_LINE_SIZE) Span {
     ///        in `(0, SizeConfig::MAX_TC_SIZE]`. Violations abort via AM_CHECK
     ///        in every build so a misaligned object grid is never carved.
     /// @pre The Span is exclusively owned by the calling CentralCache bucket.
-    void Init(size_t aligned_object_size);
+    void Init(size_t aligned_object_size) noexcept;
 
     /// @brief Allocates one object by clearing a free bitmap bit.
     /// @return Object pointer, or null when the Span is full.
     /// @pre The corresponding CentralCache bucket lock is held.
-    void* AllocObject();
+    void* AllocObject() noexcept;
 
     /// @brief Returns one object to the Span bitmap.
     /// @param ptr Object slot previously allocated from this Span.
     /// @pre The corresponding CentralCache bucket lock is held.
-    void FreeObject(void* ptr);
+    void FreeObject(void* ptr) noexcept;
 
     /// @brief Resolves a pointer to its object-slot index without touching the
     ///        bitmap. Uses uintptr_t arithmetic so the comparison stays defined
@@ -224,7 +224,7 @@ public:
         friend bool operator==(const ConstIterator& a, const ConstIterator& b) noexcept {
             return a.node_ == b.node_;
         }
-        
+
         friend bool operator!=(const ConstIterator& a, const ConstIterator& b) noexcept {
             return a.node_ != b.node_;
         }
