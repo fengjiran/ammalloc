@@ -1,15 +1,14 @@
-//
-// Created by richard on 2/9/26.
-//
 #include "ammalloc/config.h"
 #include "ammalloc/page_allocator.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <gtest/gtest.h>
 #include <limits>
 #include <sys/mman.h>
 #include <thread>
+#include <vector>
 
 namespace {
 using namespace ammalloc;
@@ -17,6 +16,17 @@ using namespace ammalloc;
 struct PooledTestNode {
     PooledTestNode* next{nullptr};
 };
+
+// Page-sized, page-aligned node mirroring RadixNode's storage demands.
+struct alignas(SystemConfig::PAGE_SIZE) PageAlignedTestNode {
+    char data[SystemConfig::PAGE_SIZE];
+};
+
+// Reports whether two slots are adjacent in one chunk's bump region.
+bool AreAdjacentSlots(const void* a, const void* b) noexcept {
+    return reinterpret_cast<const char*>(b) ==
+           reinterpret_cast<const char*>(a) + sizeof(PooledTestNode);
+}
 
 class PageAllocatorTest : public ::testing::Test {
 public:
@@ -31,14 +41,14 @@ public:
         PageAllocator::ReleaseHugePageCache();
     }
 
-    // 辅助函数：验证指针有效性
+    // Helper: validates pointer sanity.
     bool IsValidPtr(void* ptr) {
         return ptr != nullptr && ptr != MAP_FAILED;
     }
 
-    // 辅助函数：模拟大页分配失败（修改mmap返回值，仅测试用）
+    // Helper: simulates huge-page allocation failure (test-only).
     static void MockHugePageAllocFail() {
-        // 可通过全局标志/环境变量控制AllocHugePage返回nullptr
+        // The global flag forces AllocHugePage to return nullptr.
         g_mock_huge_alloc_fail.store(true, std::memory_order_relaxed);
     }
 
@@ -47,26 +57,26 @@ public:
     }
 };
 
-// ========== 测试用例1：普通页分配/释放（无缓存） ==========
+// ========== Case 1: normal-page allocation/free (no cache) ==========
 TEST_F(PageAllocatorTest, NormalPageAllocFree) {
     size_t page_num = 1;
     void* ptr = PageAllocator::SystemAlloc(page_num);
-    // 1. 验证指针非空
+    // 1. Verify the pointer is non-null.
     EXPECT_TRUE(IsValidPtr(ptr));
 
     const auto& stats = PageAllocator::GetStats();
     EXPECT_EQ(stats.normal_alloc_count.load(), 1);
     EXPECT_EQ(stats.normal_alloc_success.load(), 1);
     EXPECT_EQ(stats.normal_alloc_bytes.load(), SystemConfig::PAGE_SIZE * page_num);
-    EXPECT_EQ(stats.huge_alloc_count.load(), 0);// 无大页请求
+    EXPECT_EQ(stats.huge_alloc_count.load(), 0);// No huge-page request.
 
-    // 2. 验证读写权限 (防止只分配了虚拟地址但不可写)
-    // 写入 Pattern
+    // 2. Verify read/write access (guards against a mapping without backing).
+    // Write a pattern.
     int* int_ptr = static_cast<int*>(ptr);
     *int_ptr = 0xDEADBEEF;
     EXPECT_EQ(*int_ptr, 0xDEADBEEF);
 
-    // 填充整个页，确保没有 Segfaul
+    // Fill the whole page to catch any segfault.
     std::memset(ptr, 0xAB, page_num * SystemConfig::PAGE_SIZE);
     for (size_t i = 0; i < page_num * SystemConfig::PAGE_SIZE; ++i) {
         EXPECT_EQ(static_cast<unsigned char*>(ptr)[i], 0xAB);
@@ -80,7 +90,7 @@ TEST_F(PageAllocatorTest, NormalPageAllocFree) {
     EXPECT_EQ(stats.huge_cache_miss_count.load(), 0);
 }
 
-// ========== 测试用例2：大页分配/释放（缓存未命中） ==========
+// ========== Case 2: huge-page allocation/free (cache miss) ==========
 TEST_F(PageAllocatorTest, HugePageAllocFree_MissCache) {
     size_t page_num = SystemConfig::HUGE_PAGE_SIZE / SystemConfig::PAGE_SIZE;
     void* ptr = PageAllocator::SystemAlloc(page_num);
@@ -98,7 +108,7 @@ TEST_F(PageAllocatorTest, HugePageAllocFree_MissCache) {
     EXPECT_EQ(stats.free_bytes.load(), SystemConfig::HUGE_PAGE_SIZE);
 }
 
-// ========== 测试用例3：大页分配（缓存命中） ==========
+// ========== Case 3: huge-page allocation (cache hit) ==========
 TEST_F(PageAllocatorTest, HugePageAlloc_HitCache) {
     size_t page_num = SystemConfig::HUGE_PAGE_SIZE / SystemConfig::PAGE_SIZE;
     void* ptr1 = PageAllocator::SystemAlloc(page_num);
@@ -110,13 +120,13 @@ TEST_F(PageAllocatorTest, HugePageAlloc_HitCache) {
 
     const auto& stats = PageAllocator::GetStats();
     EXPECT_EQ(stats.huge_cache_hit_count.load(), 1);
-    EXPECT_EQ(stats.huge_cache_miss_count.load(), 1);// 第一次未命中
-    EXPECT_EQ(stats.huge_alloc_count.load(), 1);     // 缓存命中不触发新分配
+    EXPECT_EQ(stats.huge_cache_miss_count.load(), 1);// First access misses.
+    EXPECT_EQ(stats.huge_alloc_count.load(), 1);     // A cache hit triggers no new allocation.
 
     PageAllocator::SystemFree(ptr2, page_num);
 }
 
-// ========== 测试用例4：大页分配失败→降级到普通页 ==========
+// ========== Case 4: huge-page failure -> normal-page fallback ==========
 TEST_F(PageAllocatorTest, HugePageAllocFail_FallbackToNormal) {
     MockHugePageAllocFail();
 
@@ -126,8 +136,8 @@ TEST_F(PageAllocatorTest, HugePageAllocFail_FallbackToNormal) {
 
     const auto& stats = PageAllocator::GetStats();
     EXPECT_EQ(stats.huge_alloc_count.load(), 1);
-    EXPECT_EQ(stats.huge_alloc_success.load(), 0);           // 大页分配失败
-    EXPECT_EQ(stats.huge_fallback_to_normal_count.load(), 1);// 降级次数
+    EXPECT_EQ(stats.huge_alloc_success.load(), 0);           // Huge-page allocation failed.
+    EXPECT_EQ(stats.huge_fallback_to_normal_count.load(), 1);// Fallback count.
     EXPECT_EQ(stats.normal_alloc_count.load(), 1);
     EXPECT_EQ(stats.normal_alloc_success.load(), 1);
 
@@ -135,7 +145,7 @@ TEST_F(PageAllocatorTest, HugePageAllocFail_FallbackToNormal) {
     PageAllocator::SystemFree(ptr, page_num);
 }
 
-// ========== 测试用例5：缓存清理（全局缓存） ==========
+// ========== Case 5: cache cleanup (global cache) ==========
 TEST_F(PageAllocatorTest, HugeCacheCleanup) {
     size_t page_num = SystemConfig::HUGE_PAGE_SIZE / SystemConfig::PAGE_SIZE;
     std::vector<void*> ptrs;
@@ -150,23 +160,23 @@ TEST_F(PageAllocatorTest, HugeCacheCleanup) {
     PageAllocator::ReleaseHugePageCache();
 }
 
-// ========== 测试用例6：边界条件（page_num=0/空指针释放） ==========
+// ========== Case 6: boundary conditions (page_num=0/null free) ==========
 TEST_F(PageAllocatorTest, BoundaryConditions) {
-    // 1. page_num=0分配
+    // 1. Allocate 0 pages.
     void* ptr1 = PageAllocator::SystemAlloc(0);
     EXPECT_EQ(ptr1, nullptr);
 
-    // 2. 空指针释放
+    // 2. Free a null pointer.
     PageAllocator::SystemFree(nullptr, 1);
     const auto& stats = PageAllocator::GetStats();
-    EXPECT_EQ(stats.free_count.load(), 0);// 无效释放不统计
+    EXPECT_EQ(stats.free_count.load(), 0);// Invalid frees are not counted.
 
-    // 3. 释放page_num=0
+    // 3. Free with page_num = 0.
     void* ptr2 = PageAllocator::SystemAlloc(1);
     PageAllocator::SystemFree(ptr2, 0);
-    EXPECT_EQ(stats.free_count.load(), 0);// 无效释放不统计
+    EXPECT_EQ(stats.free_count.load(), 0);// Invalid frees are not counted.
 
-    // 清理
+    // Clean up.
     PageAllocator::SystemFree(ptr2, 1);
 }
 
@@ -182,11 +192,132 @@ TEST_F(PageAllocatorTest, ObjectPoolTryNewReturnsNullOnBackingOom) {
     pool.Delete(node);
 }
 
-// ========== 测试套件：线程安全测试 ==========
+TEST_F(PageAllocatorTest, ObjectPoolDeleteMakesStorageImmediatelyReusable) {
+    ObjectPool<PooledTestNode> pool;
+    auto* first = pool.TryNew();
+    ASSERT_NE(first, nullptr);
+
+    pool.Delete(first);
+    auto* second = pool.TryNew();
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(second, first);
+
+    pool.Delete(second);
+}
+
+// ========== ObjectPool pooling tests ==========
+
+TEST_F(PageAllocatorTest, ObjectPoolGrowsNewChunkWhenExhausted) {
+    ObjectPool<PooledTestNode, 4096> pool;
+    std::vector<PooledTestNode*> nodes;
+    bool new_chunk_seen = false;
+    for (size_t i = 0; i < 4096; ++i) {
+        PooledTestNode* node = pool.TryNew();
+        ASSERT_NE(node, nullptr);
+        nodes.push_back(node);
+        // Within one chunk the bump pointer yields strictly adjacent slots;
+        // a gap marks the first slot of a fresh chunk.
+        if (i > 0 && !AreAdjacentSlots(nodes[i - 1], nodes[i])) {
+            new_chunk_seen = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(new_chunk_seen);
+
+    // Every handed-out slot must be distinct.
+    std::sort(nodes.begin(), nodes.end());
+    EXPECT_EQ(std::adjacent_find(nodes.begin(), nodes.end()), nodes.end());
+
+    for (PooledTestNode* node: nodes) {
+        pool.Delete(node);
+    }
+}
+
+TEST_F(PageAllocatorTest, ObjectPoolReusesFreedSlotsAcrossChunksInLifoOrder) {
+    ObjectPool<PooledTestNode, 4096> pool;
+    std::vector<PooledTestNode*> nodes;
+    size_t guard = 0;
+    // Consume the first chunk; the loop ends with nodes.back() being the
+    // first slot of the second chunk.
+    while (nodes.size() < 2 ||
+           AreAdjacentSlots(nodes[nodes.size() - 2], nodes.back())) {
+        ASSERT_LT(guard++, 4096u) << "chunk boundary not reached";
+        PooledTestNode* node = pool.TryNew();
+        ASSERT_NE(node, nullptr);
+        nodes.push_back(node);
+    }
+
+    PooledTestNode* chunk2_tail1 = pool.TryNew();
+    PooledTestNode* chunk2_tail2 = pool.TryNew();
+    ASSERT_NE(chunk2_tail1, nullptr);
+    ASSERT_NE(chunk2_tail2, nullptr);
+
+    PooledTestNode* first_of_chunk1 = nodes.front();
+    pool.Delete(first_of_chunk1);
+    pool.Delete(chunk2_tail2);
+
+    PooledTestNode* reused1 = pool.TryNew();
+    PooledTestNode* reused2 = pool.TryNew();
+    ASSERT_NE(reused1, nullptr);
+    ASSERT_NE(reused2, nullptr);
+    EXPECT_EQ(reused1, chunk2_tail2);    // LIFO: last deleted returned first
+    EXPECT_EQ(reused2, first_of_chunk1);// then the earlier deletion
+
+    pool.Delete(reused1);
+    pool.Delete(reused2);
+}
+
+TEST_F(PageAllocatorTest, ObjectPoolReleaseMemoryKeepsPoolReusable) {
+    ObjectPool<PooledTestNode, 4096> pool;
+    PooledTestNode* a = pool.TryNew();
+    PooledTestNode* b = pool.TryNew();
+    ASSERT_NE(a, nullptr);
+    ASSERT_NE(b, nullptr);
+    pool.Delete(b);// Leave one slot on the free list before releasing.
+
+    pool.ReleaseMemory();
+    pool.ReleaseMemory();// Releasing an empty pool must be a no-op.
+
+    PooledTestNode* c = pool.TryNew();
+    ASSERT_NE(c, nullptr);
+    c->next = a;// The recycled slot must be writable.
+    EXPECT_EQ(c->next, a);
+    pool.Delete(c);
+}
+
+TEST_F(PageAllocatorTest, ObjectPoolDestructorReleasesAllChunks) {
+    {
+        ObjectPool<PooledTestNode, 4096> pool;
+        for (int i = 0; i < 1500; ++i) {// 4 KiB chunk holds ~1022 slots; covers two chunks.
+            ASSERT_NE(pool.TryNew(), nullptr);
+        }
+    }
+    // Chunks are munmapped by the destructor: LeakSanitizer verifies no leak,
+    // and a double-free during teardown would abort.
+}
+
+TEST_F(PageAllocatorTest, ObjectPoolKeepsPageAlignedSlotsForPageSizedType) {
+    ObjectPool<PageAlignedTestNode> pool;
+    std::vector<PageAlignedTestNode*> nodes;
+    // 20 slots exceed one chunk's 17-slot capacity, covering the
+    // cross-chunk allocation path for page-sized objects.
+    for (size_t i = 0; i < 20; ++i) {
+        PageAlignedTestNode* node = pool.TryNew();
+        ASSERT_NE(node, nullptr);
+        EXPECT_EQ(reinterpret_cast<uintptr_t>(node) & (SystemConfig::PAGE_SIZE - 1),
+                  0u);
+        nodes.push_back(node);
+    }
+    for (PageAlignedTestNode* node: nodes) {
+        pool.Delete(node);
+    }
+}
+
+// ========== Test suite: thread safety ==========
 class PageAllocatorThreadSafeTest : public ::testing::Test {
 protected:
-    static constexpr int THREAD_NUM = 8;        // 8个线程
-    static constexpr int ALLOC_PER_THREAD = 100;// 每个线程分配100次
+    static constexpr int THREAD_NUM = 8;        // 8 threads.
+    static constexpr int ALLOC_PER_THREAD = 100;// 100 allocations per thread.
 
     void SetUp() override {
         PageAllocator::ResetStats();
@@ -213,69 +344,74 @@ protected:
     }
 };
 
-// ========== 测试用例7：多线程并发分配/释放（线程安全） ==========
+// ========== Case 7: concurrent multi-threaded allocation/free ==========
 TEST_F(PageAllocatorThreadSafeTest, ConcurrentAllocFree) {
     std::atomic<int> success_count{0};
     std::vector<std::thread> threads;
 
-    // 启动8个线程
+    // Start 8 threads.
     for (int i = 0; i < THREAD_NUM; ++i) {
         threads.emplace_back(ThreadFunc, std::ref(success_count));
     }
 
-    // 等待所有线程完成
+    // Wait for all threads to finish.
     for (auto& t: threads) {
         t.join();
     }
 
-    // ========== 核心验证：线程安全基础（必须成立） ==========
-    // 1. 总成功次数 = 线程数 × 每线程分配次数（验证无分配/释放失败）
+    // ========== Core check: thread-safety baseline (must hold) ==========
+    // 1. Successes == threads * allocations per thread (no allocation/free
+    //    failures).
     const int total_expected = THREAD_NUM * ALLOC_PER_THREAD;
     EXPECT_EQ(success_count.load(std::memory_order_relaxed), total_expected);
 
-    // 2. 释放次数 = 成功分配次数（每个分配都对应释放，验证无漏释放）
+    // 2. Frees == successes (each allocation has a matching free).
     const auto& stats = PageAllocator::GetStats();
     EXPECT_EQ(stats.free_count.load(std::memory_order_relaxed), total_expected);
 
-    // ========== 适配缓存机制的统计验证（核心修正） ==========
-    // 关键公式：总大页请求数 = 缓存命中数 + 缓存未命中数
-    // （所有成功分配都是大页请求，因为线程函数只分配大页）
+    // ========== Cache-aware statistics checks ==========
+    // Key relation: total huge-page requests = cache hits + cache misses.
+    // (Every successful allocation is a huge-page request: the thread body
+    // only allocates huge pages.)
     size_t total_huge_request = stats.huge_cache_hit_count.load() + stats.huge_cache_miss_count.load();
     EXPECT_EQ(total_huge_request, total_expected);
 
-    // 关键公式：缓存未命中数 = 大页实际分配数（huge_alloc_count）
-    // （只有未命中时才会调用AllocHugePage，累加huge_alloc_count）
+    // Key relation: cache misses = real huge-page allocations
+    // (huge_alloc_count). AllocHugePage runs only on a miss, incrementing
+    // huge_alloc_count.
     EXPECT_EQ(stats.huge_cache_miss_count.load(), stats.huge_alloc_count.load());
 
-    // 额外验证：普通页分配数为0（线程函数只分配大页，无普通页请求）
+    // Extra check: no normal-page allocations (the thread body only asks for
+    // huge pages).
     EXPECT_EQ(stats.normal_alloc_count.load(), 0);
 
-    // 验证无崩溃、无数据竞争
+    // The run completes without crashes or data races.
     SUCCEED();
 }
 
 TEST_F(PageAllocatorTest, AllocHugeAlignment) {
-    // 1. 计算触发 HugePage 逻辑的阈值
-    // 代码逻辑是: size >= HUGE_PAGE_SIZE / 2
+    // 1. Compute the threshold that triggers huge-page handling:
+    //    size >= HUGE_PAGE_SIZE / 2.
     size_t huge_size = SystemConfig::HUGE_PAGE_SIZE;
-    size_t page_num = huge_size >> SystemConfig::PAGE_SHIFT;// 申请 2MB (通常 512 页)
+    size_t page_num = huge_size >> SystemConfig::PAGE_SHIFT;// Request 2MB (usually 512 pages).
     void* ptr = PageAllocator::SystemAlloc(page_num);
     EXPECT_TRUE(ptr != nullptr);
 
-    // 2. 【核心】验证对齐
+    // 2. Verify alignment (core check).
     auto addr = reinterpret_cast<uintptr_t>(ptr);
     uintptr_t alignment = SystemConfig::HUGE_PAGE_SIZE;
 
-    // 地址必须能被 2MB 整除
+    // The address must be divisible by 2MB.
     EXPECT_EQ(addr % alignment, 0)
             << "Pointer " << ptr << " is NOT aligned to " << alignment;
 
-    // 3. 验证首尾读写 (确保 Trim 逻辑没有把需要的内存切掉)
+    // 3. Verify first/last-byte access (the trim logic must not cut needed
+    //    memory).
     char* char_ptr = static_cast<char*>(ptr);
     size_t total_bytes = page_num * SystemConfig::PAGE_SIZE;
-    // 写头部
+    // Write the head.
     char_ptr[0] = 'A';
-    // 写尾部 (最后一个字节)
+    // Write the tail (last byte).
     char_ptr[total_bytes - 1] = 'Z';
 
     EXPECT_EQ(char_ptr[0], 'A');
@@ -287,17 +423,17 @@ TEST_F(PageAllocatorTest, AllocHugeAlignment) {
 TEST_F(PageAllocatorTest, MultipleAllocations) {
     std::vector<std::pair<void*, size_t>> allocations;
 
-    // 混合分配：1页, 10页, 512页(大页)
+    // Mixed allocation: 1, 10, 512 (huge) pages.
     std::vector<size_t> sizes = {1, 10, 128, 512, 600};
 
     for (size_t pages: sizes) {
         void* ptr = PageAllocator::SystemAlloc(pages);
         EXPECT_TRUE(ptr != nullptr);
 
-        // 简单写入验证
+        // Simple write check.
         static_cast<char*>(ptr)[0] = 0xFF;
 
-        // 如果是大内存，顺便验证对齐
+        // For large mappings, also verify alignment.
         size_t bytes = pages << SystemConfig::PAGE_SHIFT;
         if (bytes >= (SystemConfig::HUGE_PAGE_SIZE >> 1)) {
             EXPECT_EQ(reinterpret_cast<uintptr_t>(ptr) % SystemConfig::HUGE_PAGE_SIZE, 0);
@@ -306,23 +442,22 @@ TEST_F(PageAllocatorTest, MultipleAllocations) {
         allocations.emplace_back(ptr, pages);
     }
 
-    // 释放所有
+    // Release everything.
     for (auto& [fst, snd]: allocations) {
         PageAllocator::SystemFree(fst, snd);
     }
 }
 
 TEST_F(PageAllocatorTest, InvalidArgs) {
-    // 1. 申请 0 页
-    // mmap 申请 0 大小通常会失败，PageAllocator 应该返回 nullptr 或处理
-    // 根据实现，size=0 会传入 mmap，导致失败返回 nullptr
+    // 1. Allocate 0 pages. The implementation rejects a zero page count
+    //    before it reaches mmap, so the result is null.
     void* ptr = PageAllocator::SystemAlloc(0);
     EXPECT_TRUE(ptr == nullptr);
 
-    // 2. 释放 nullptr (不应崩溃)
+    // 2. Free a null pointer (must not crash).
     PageAllocator::SystemFree(nullptr, 100);
 
-    // 3. 释放页数为 0 (不应崩溃)
+    // 3. Free with page_num = 0 (must not crash).
     char dummy;
     PageAllocator::SystemFree(&dummy, 0);
 }
@@ -393,19 +528,17 @@ TEST_F(PageAllocatorTest, AdjacentHugeBoundaryDoesNotPopulateHugeCache) {
 }
 
 TEST_F(PageAllocatorTest, AllocWithPopulateConfig) {
-    // 设置环境变量 (Linux/macOS)
-    // 注意：setenv 不是线程安全的，最好在 main 开始前设置，或者独立跑这个测试
+    // setenv is not thread-safe; this test runs alone, so it is fine here.
     setenv("AM_USE_MAP_POPULATE", "1", 1);
 
-    // 重新初始化 Config (如果 Config 是懒加载单例)
-    // 这一步依赖于 RuntimeConfig 实现是否支持重置，
-    // 或者我们假设这是程序启动后的第一次调用。
-    void* ptr = PageAllocator::SystemAlloc(10);// 应该触发 MAP_POPULATE
+    // RuntimeConfig reads the environment at first use. This test assumes it
+    // is the first use in the process (the singleton does not support reset).
+    void* ptr = PageAllocator::SystemAlloc(10);// Should trigger MAP_POPULATE.
     EXPECT_TRUE(ptr != nullptr);
 
     PageAllocator::SystemFree(ptr, 10);
 
-    // 清理环境
+    // Clean up the environment.
     unsetenv("AM_USE_MAP_POPULATE");
 }
 

@@ -874,8 +874,9 @@ PageMap 是全局索引，只能在所有 active shard 清空、reader 静止后
 
 当前 ObjectPool 解决了递归分配，但：
 
-- `Delete()` 立即把 slot 放回 free list，不满足无锁 PageMap reader 的延迟回收；
-- pool 内部 mutex 与外层 shard mutex 形成嵌套锁；
+- `Delete()` 立即把 slot 放回 free list；这只适用于当前由 object ownership pin 住的
+  PageMap 调用点，不满足任意无锁 PageMap reader 的延迟回收；
+- pool 依赖外层 shard/structure mutex 串行化；
 - Span 与大型 extent 冷 metadata 需求不同；
 - `ReleaseMemory()` 只适合全局 quiescent reset。
 

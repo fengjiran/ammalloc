@@ -51,6 +51,28 @@ class PageMap {
 
 `RadixRootNode` 和 `RadixNode` 的 `children` 采用固定大小 `std::array<std::atomic<void*>, N>`，不触发动态分配。
 
+### 2.1.1 Span descriptor 借用与回收
+
+`PageMap::GetSpan()` 返回 unpinned borrowed `Span*`，不转移 descriptor
+ownership，也不提供通用 read-side grace period。当前合法调用点只能在以下任一
+条件成立时解引用该指针：
+
+- 持有 Span 所属 PageCache shard lock；
+- 持有一个 live small object，或一个仍位于 ThreadCache/TransferCache 的对象；
+  此类对象仍计入 Span 的 `use_count`，从而阻止 Span 归还 PageCache；
+- 持有该 large allocation 的唯一 live owner；
+- allocator 处于已证明无并发借用者的 quiescent reset/teardown。
+
+因此当前协议仅覆盖由 object ownership 约束的 `am_free`、CentralCache 和
+PageCache 调用点；它不支持任意诊断、profiling 或 `usable_size` observer 在没有
+额外 lifetime guard 的情况下保存或访问 `Span*`。`ObjectPool::Delete()` 会立即
+复用 storage，调用方必须在回收前自行满足上述 pinning 条件。
+
+Coalescing 先完成 survivor 的字段更新和 `PageMap::SetSpan()`，再回收被吸收的
+neighbor descriptor。该顺序避免 leaf 仍指向 neighbor 时覆写其 pool storage，但不
+构成通用 lock-free reclamation；将来新增通用 reader 时仍需 stable metadata 或
+epoch/hazard/QSBR 一类的延迟回收机制。
+
 ### 2.4 已落地实现变更（2026-03-17）
 
 `PageMap` root 初始化路径已从对象池切换为静态 root：

@@ -58,11 +58,16 @@ CentralCache 从 PageCache 借用一个小对象 Span 时，不取得 descriptor
 
 `PageMap::GetSpan()` 返回的是 borrowed pointer，不转移所有权。借用必须有明确有效期：
 
-- **当前实现隐含契约**：调用者读取 leaf 后立即访问 Span，但没有显式 read-side guard；该契约不足以支持 descriptor 立即复用。
-- **第一阶段推荐契约**：已经发布的 descriptor 在 allocator 正常运行期间保持稳定地址，不单独回收；borrow 在一次 API 调用内天然安全。
+- **当前实现契约**：结果是 unpinned borrow。现有 `am_free`/CentralCache 调用点必须由
+  owner shard lock、仍由 `use_count` 计数的 live/cached small object、唯一 live large
+  allocation，或 allocator-wide quiescence 之一 pin 住 descriptor。
+- **当前实现限制**：该 object-ownership pinning 不支持任意 PageMap observer 在没有
+  独立 read-side guard 的情况下访问 descriptor；`Delete()` 的立即复用不能泛化为
+  lock-free reader 回收协议。
 - **未来 epoch 契约**：调用者进入 PageMap read-side critical section，退出前 descriptor 不得回收。
 
-在没有 stable metadata 或 epoch guard 之前，任何 `ObjectPool::Delete(span)` 都不能被视为安全的无锁读者回收协议。
+在没有 stable metadata 或 epoch guard 之前，任何 `ObjectPool::Delete(span)` 都不能被
+视为对不受 object ownership 约束的无锁 reader 安全的回收协议。
 
 ## 5.2 核心生命周期不变量
 
@@ -1106,4 +1111,3 @@ radix density          = mapped leaves / radix leaf capacity
 - 仍保留可切回 stable metadata 的构建选项，便于诊断和回滚。
 
 风险类型：并发、内存、性能。
-

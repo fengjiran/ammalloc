@@ -1,6 +1,3 @@
-//
-// Created by richard on 2/12/26.
-//
 #include "ammalloc/page_cache.h"
 
 #include <cstring>
@@ -45,8 +42,9 @@ protected:
     }
 };
 
-// 测试点 1: 超大内存分配 (> 128页)
-// 预期：不经过桶，直接向 PageAllocator 申请，释放时直接还给系统
+// Point 1: oversized allocation (> 128 pages).
+// Oversized requests bypass the buckets: PageAllocator maps them directly and
+// they return straight to the OS on release.
 TEST_F(PageCacheTest, OversizedAllocation) {
     size_t huge_pages = PageConfig::MAX_PAGE_NUM + 10;
     auto* span = cache_.AllocSpan(huge_pages);
@@ -62,116 +60,119 @@ TEST_F(PageCacheTest, OversizedAllocation) {
     EXPECT_TRUE(PageMap::GetSpan(last_page_ptr) == nullptr);
 }
 
-// 测试点 2: 系统进货与切分 (Refill & Split)
+// Point 2: refill and split.
 TEST_F(PageCacheTest, RefillAndSplit) {
-    // 1. 申请 1 页
-    // 预期：PageCache 发现没内存 -> 申请 128 页 -> 切出 1 页给用户 -> 剩 127 页挂在 bucket[127]
+    // 1. Allocate 1 page.
+    // Expected: empty PageCache -> maps 128 pages -> splits off 1 page for the
+    // caller -> the remaining 127 pages land in bucket[127].
     Span* span1 = cache_.AllocSpan(1);
     ASSERT_NE(span1, nullptr);
     EXPECT_EQ(span1->page_num, 1);
 
-    // 2. 再申请 10 页
-    // 预期：从 bucket[127] 拿出 -> 切出 10 页 -> 剩 117 页挂在 bucket[117]
+    // 2. Allocate 10 more pages.
+    // Expected: take from bucket[127] -> split off 10 pages -> the remaining
+    // 117 pages land in bucket[117].
     Span* span2 = cache_.AllocSpan(10);
     ASSERT_NE(span2, nullptr);
     EXPECT_EQ(span2->page_num, 10);
 
-    // 验证：127 号桶空了，117 号桶有了
-    // 注意：这取决于单例之前的状态，如果之前是空的，逻辑成立。
-    // 如果之前有残留数据，可能直接从 bucket[10] 拿。
-    // 假设这是冷启动环境：
+    // Verify: bucket 127 is empty and bucket 117 is populated.
+    // Note: this assumes a cold-start singleton state; leftover state from a
+    // previous run could satisfy the request straight from bucket[10].
     EXPECT_TRUE(IsBucketEmpty(127));
     EXPECT_FALSE(IsBucketEmpty(117));
 
-    // 清理
+    // Clean up.
     cache_.ReleaseSpan(span1);
     cache_.ReleaseSpan(span2);
 }
 
-// 测试点 3: 合并逻辑 (Coalescing)
-// 这是一个复杂的场景，验证左右合并
+// Point 3: coalescing.
+// A complex scenario that verifies left and right merging.
 TEST_F(PageCacheTest, MergeLogic) {
-    // 策略：为了确保地址连续，我们一次性申请一大块，然后手动切分释放来模拟碎片
+    // Strategy: allocate consecutive spans from one large block, then release
+    // them selectively to simulate fragmentation.
 
-    // 1. 申请 64 页 (占据半个最大块)
+    // 1. Allocate 64 pages (half of the largest block).
     Span* spanA = cache_.AllocSpan(64);
     ASSERT_NE(spanA, nullptr);
 
-    // 2. 申请 32 页
+    // 2. Allocate 32 pages.
     Span* spanB = cache_.AllocSpan(32);
     ASSERT_NE(spanB, nullptr);
 
-    // 3. 申请 32 页
+    // 3. Allocate another 32 pages.
     Span* spanC = cache_.AllocSpan(32);
     ASSERT_NE(spanC, nullptr);
 
-    // 此时我们假设 spanA, spanB, spanC 在物理上是连续的
-    // (这取决于 AllocSpan 的切分逻辑，通常是连续切下来的)
-    // 验证连续性：
+    const size_t span_a_start = spanA->start_page_idx;
+    const size_t span_b_start = spanB->start_page_idx;
+    const size_t span_c_start = spanC->start_page_idx;
+
+    // spanA, spanB, and spanC are expected to be physically contiguous,
+    // because the split logic carves them off one large mapping in order.
+    // Verify contiguity:
     bool is_continuous = (spanA->start_page_idx + spanA->page_num == spanB->start_page_idx) &&
                          (spanB->start_page_idx + spanB->page_num == spanC->start_page_idx);
 
     EXPECT_TRUE(is_continuous);
-    // 如果不连续（比如中间夹杂了其他线程分配的），这个测试可能无法验证合并。
-    // 但在单线程测试环境下，大概率是连续的。
+    // Non-contiguity (e.g. interleaved allocations from other threads) would
+    // make the merge assertions below unverifiable. Single-threaded runs are
+    // expected to be contiguous.
     if (!is_continuous) {
-        // 尝试调整顺序，可能是反向切分的
-        // 这里的断言依赖于具体的切分实现（Head Split 还是 Tail Split）
-        // 你的实现是 Head Split (small_span 拿走 start_page_idx)，所以地址是递增的。
-        // 但 AllocSpan 遍历桶是从小到大还是从大到小？
-        // 你的实现：for (i = page_num + 1; ...) 找第一个非空。
-        // 进货时：span 放入 128 桶。
-        // 第一次 Alloc(64)：找到 128，切出 64(A)，剩 64 放回 bucket[64]。
-        // 第二次 Alloc(32)：找到 64，切出 32(B)，剩 32 放回 bucket[32]。
-        // 第三次 Alloc(32)：找到 32，直接拿走(C)。
-        // 所以顺序应该是 A -> B -> C 连续。
+        // The order depends on the split implementation. AllocSpan uses head
+        // split: the new span takes start_page_idx, so addresses grow. The
+        // bucket scan goes upward from page_num + 1 and refills land in
+        // bucket[128]: Alloc(64) splits 128 into 64(A) + 64(bucket[64]),
+        // Alloc(32) splits 64 into 32(B) + 32(bucket[32]), and Alloc(32)
+        // takes 32(C) directly. A -> B -> C is therefore contiguous.
     }
 
-    // 4. 释放 A (64页) -> 进入 bucket[64]
+    // 4. Release A (64 pages) -> lands in bucket[64].
     cache_.ReleaseSpan(spanA);
 
-    // 5. 释放 C (32页) -> 进入 bucket[32]
+    // 5. Release C (32 pages) -> lands in bucket[32].
     cache_.ReleaseSpan(spanC);
 
-    // 此时 B 夹在中间，A 和 C 不能合并。
+    // B sits between the two free neighbors, so A and C cannot merge yet.
 
-    // 6. 释放 B (32页) -> 触发合并！
-    // B 左边是 A (空闲)，右边是 C (空闲)。
-    // 应该发生：A + B + C = 128 页。
+    // 6. Release B (32 pages) -> triggers coalescing: A + B + C = 128 pages.
     cache_.ReleaseSpan(spanB);
     EXPECT_FALSE(IsBucketEmpty(128));
 
-    // 验证：
-    // 理论上 bucket[128] 应该增加了一个 Span。
-    // 我们可以尝试申请一个 128 页的 Span，如果能申请到且不用系统调用（很难验证系统调用），说明合并成功。
+    // Coalescing must remap every absorbed range to the surviving descriptor
+    // before that descriptor can be reused by a later PageCache allocation.
+    EXPECT_EQ(PageMap::GetSpan(span_a_start), spanB);
+    EXPECT_EQ(PageMap::GetSpan(span_b_start), spanB);
+    EXPECT_EQ(PageMap::GetSpan(span_c_start), spanB);
+
+    // Verify: bucket[128] should have gained one Span. Requesting 128 pages
+    // succeeds iff the three releases coalesced back into the original block.
 
     Span* spanFull = cache_.AllocSpan(128);
     ASSERT_NE(spanFull, nullptr);
 
-    // 验证拿到的这个大块，是不是原来的 A 的起始地址
-    // 如果合并成功，spanFull->start_page_idx 应该等于 spanA->start_page_idx
-    // (前提是这期间没有其他干扰)
-    EXPECT_EQ(spanFull->start_page_idx, spanB->start_page_idx);
+    // If coalescing succeeded, the merged block starts at A's original address.
+    EXPECT_EQ(spanFull, spanB);
+    EXPECT_EQ(spanFull->start_page_idx, span_a_start);
 
     cache_.ReleaseSpan(spanFull);
 }
 
-// 测试点 4: PageMap 映射一致性
+// Point 4: PageMap mapping consistency.
 TEST_F(PageCacheTest, PageMapConsistency) {
     size_t pages = 4;
     Span* span = cache_.AllocSpan(pages);
 
-    // 验证 span 覆盖的每一个页号，在 PageMap 中都指向该 span
+    // Every page covered by the span must resolve back to that span.
     for (size_t i = 0; i < pages; ++i) {
         void* addr = static_cast<char*>(span->GetPageBaseAddr()) + i * SystemConfig::PAGE_SIZE;
         EXPECT_EQ(PageMap::GetSpan(addr), span);
     }
 
     cache_.ReleaseSpan(span);
-    // 释放后，PageMap 指向的 Span 对象已被 delete，
-    // 但 SetSpan(span) 在 ReleaseSpan 内部被调用，
-    // 此时 PageMap 指向的是已经在 FreeList 中的 span（虽然指针值没变，但状态变了）。
-    // 验证 is_used 状态
+    // After release, PageMap still points at the same descriptor, now sitting
+    // in the free list with its used flag cleared. Verify the state change:
     Span* freed_span = PageMap::GetSpan(span->GetPageBaseAddr());
     EXPECT_FALSE(freed_span->IsUsed());
 }
@@ -242,14 +243,12 @@ TEST_F(PageCacheTest, ReleaseResetsSpanMetadataWithoutMerge) {
     ASSERT_NE(free_span, nullptr);
     EXPECT_EQ(free_span->page_num, 8);
     EXPECT_FALSE(free_span->IsUsed());
-    // EXPECT_EQ(free_span->obj_size, 0);
     EXPECT_TRUE(free_span->IsCommitted());
 
     Span* reused = cache_.AllocSpan(8);
     ASSERT_NE(reused, nullptr);
     EXPECT_EQ(reused, free_span);
     EXPECT_TRUE(reused->IsUsed());
-    // EXPECT_EQ(reused->obj_size, 256);
 
     cache_.ReleaseSpan(span_a);
     cache_.ReleaseSpan(reused);
@@ -336,27 +335,26 @@ TEST_F(PageCacheTest, FreshSpanRollsBackWhenPageMapMetadataOom) {
     cache_.ReleaseSpan(span);
 }
 
-// 测试点 5: 压力测试 (随机分配释放)
+// Point 5: stress test with random allocation and release.
 TEST_F(PageCacheTest, RandomStress) {
     std::vector<Span*> spans;
     std::mt19937 g(42);
     std::uniform_int_distribution<> dis(1, 20);
 
     for (int i = 0; i < 1000; ++i) {
-        // 随机申请 1 ~ 20 页
+        // Randomly allocate 1..20 pages.
         size_t k = dis(g);
         Span* s = cache_.AllocSpan(k);
         spans.push_back(s);
     }
 
-    // 随机释放
+    // Release in random order.
     std::shuffle(spans.begin(), spans.end(), g);
     for (auto* s: spans) {
         cache_.ReleaseSpan(s);
     }
 
-    // 最终检查：所有内存应该都归还了，不应有泄漏
-    // (这需要配合 ASan 检查)
+    // Final check: everything is released and nothing leaks (verify under ASan).
 }
 
 }// namespace

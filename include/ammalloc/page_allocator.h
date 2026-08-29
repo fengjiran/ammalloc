@@ -117,7 +117,12 @@ private:
 ///
 /// @note Not thread-safe. Every member mutates pool state unconditionally, so the
 ///       caller must serialize all use of a given pool. Each pooled instance names
-///       the lock that provides that serialization.
+///       the lock that provides that serialization. That lock protects pool state,
+///       not objects borrowed from the pool: before `Delete()` the caller must
+///       ensure no thread can access the object again. A deleted slot may be
+///       reconstructed for another `T` immediately. Callers with lock-free
+///       readers must provide their own object-lifetime protocol or a quiescent
+///       point before recycling storage.
 /// @tparam T Object type; its storage must hold an intrusive free-list pointer.
 /// @tparam CHUNK_SIZE Target number of bytes requested for each new chunk.
 template<typename T, size_t CHUNK_SIZE = 64 * 1024>
@@ -126,14 +131,19 @@ class ObjectPool {
 public:
     ObjectPool() = default;
 
+    // The pool owns raw chunk and free-list pointers; a copy would create two
+    // owners of the same mappings and double-free them on teardown.
+    ObjectPool(const ObjectPool&) = delete;
+    ObjectPool& operator=(const ObjectPool&) = delete;
+
     static_assert(std::is_nothrow_destructible_v<T>,
                   "ObjectPool metadata destructors must not throw");
 
     /// @brief Constructs one object in pooled storage without throwing on OOM.
     /// @tparam Args Constructor argument types.
     /// @param args Arguments forwarded to the `T` constructor.
-    /// @return Pointer to the constructed object owned by the caller until `Delete`,
-    ///         or null if a backing page mapping cannot be acquired.
+    /// @return Pointer to a constructed object, valid until `Delete()`, or null
+    ///         if a backing page mapping cannot be acquired.
     /// @note `T` construction is constrained to no-throw so metadata OOM is
     ///       represented uniformly as a null result.
     template<typename... Args>
@@ -178,7 +188,9 @@ public:
 
     /// @brief Destroys an object and returns its storage to the pool.
     /// @param obj Live object previously returned by this pool.
-    /// @pre `obj` is non-null and has not already been deleted.
+    /// @pre `obj` is non-null, belongs to this pool, and has not already been
+    ///      deleted.
+    /// @pre No thread accesses `obj` concurrently with or after this call.
     void Delete(T* obj) noexcept {
         obj->~T();
         auto* header = reinterpret_cast<FreeHeader*>(obj);

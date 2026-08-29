@@ -382,7 +382,9 @@ void PageCacheShard::ReleaseSpanLocked(Span* span) noexcept {
     }
     // clang-format on
 
-    // Coalescing never crosses an owner-shard boundary.
+    // Coalescing never crosses an owner-shard boundary. Keep absorbed
+    // descriptors alive until their PageMap leaves point at the survivor.
+    Span* retired_spans = nullptr;
     while (true) {
         if (span->start_page_idx == 0) {
             break;
@@ -398,7 +400,8 @@ void PageCacheShard::ReleaseSpanLocked(Span* span) noexcept {
         span_lists_[left_span->page_num].erase(left_span);
         span->start_page_idx = left_span->start_page_idx;
         span->page_num += left_span->page_num;
-        span_pool_.Delete(left_span);
+        left_span->next = retired_spans;
+        retired_spans = left_span;
     }
 
     while (true) {
@@ -412,7 +415,8 @@ void PageCacheShard::ReleaseSpanLocked(Span* span) noexcept {
 
         span_lists_[right_span->page_num].erase(right_span);
         span->page_num += right_span->page_num;
-        span_pool_.Delete(right_span);
+        right_span->next = retired_spans;
+        retired_spans = right_span;
     }
 
     span->SetUsed(false);
@@ -423,9 +427,14 @@ void PageCacheShard::ReleaseSpanLocked(Span* span) noexcept {
     span->capacity = 0;
     span->last_used_time_ms = GetCurrentTimeMs();
 
-    span_lists_[span->page_num].push_front(span);
     // Rewrite every mapping because coalescing invalidated neighbor metadata.
     PageMap::SetSpan(span);
+    while (retired_spans) {
+        auto* next_span = retired_spans->next;
+        span_pool_.Delete(retired_spans);
+        retired_spans = next_span;
+    }
+    span_lists_[span->page_num].push_front(span);
 }
 
 void PageCacheShard::ResetLocked() noexcept {
@@ -579,6 +588,9 @@ void PageCache::ReleaseSpan(Span* span) noexcept {
     }
     // clang-format on
 
+    // Keep absorbed descriptors alive until their PageMap leaves point at the
+    // survivor, matching the sharded implementation above.
+    Span* retired_spans = nullptr;
     while (true) {
         if (span->start_page_idx == 0) {
             break;
@@ -593,11 +605,8 @@ void PageCache::ReleaseSpan(Span* span) noexcept {
         span_lists_[left_span->page_num].erase(left_span);
         span->start_page_idx = left_span->start_page_idx;
         span->page_num += left_span->page_num;
-        // Poison metadata before recycling it so debug checks catch stale use.
-        left_span->start_page_idx = std::numeric_limits<size_t>::max();
-        left_span->page_num = 0;
-        left_span->SetUsed(true);
-        span_pool_.Delete(left_span);
+        left_span->next = retired_spans;
+        retired_spans = left_span;
     }
 
     while (true) {
@@ -610,20 +619,25 @@ void PageCache::ReleaseSpan(Span* span) noexcept {
 
         span_lists_[right_span->page_num].erase(right_span);
         span->page_num += right_span->page_num;
-        // Poison metadata before recycling it so debug checks catch stale use.
-        right_span->start_page_idx = std::numeric_limits<size_t>::max();
-        right_span->page_num = 0;
-        right_span->SetUsed(true);
-        span_pool_.Delete(right_span);
+        right_span->next = retired_spans;
+        retired_spans = right_span;
     }
 
     span->SetUsed(false);
-    span->obj_size = 0;
+    span->aligned_obj_size = 0;
+    span->use_count = 0;
+    span->obj_offset = 0;
+    span->capacity = 0;
     span->last_used_time_ms = GetCurrentTimeMs();
     span->SetCommitted(true);
-    span_lists_[span->page_num].push_front(span);
     // Rewrite every mapping because coalescing invalidated neighbor metadata.
     PageMap::SetSpan(span);
+    while (retired_spans) {
+        auto* next_span = retired_spans->next;
+        span_pool_.Delete(retired_spans);
+        retired_spans = next_span;
+    }
+    span_lists_[span->page_num].push_front(span);
 }
 
 void PageCache::Reset() noexcept {

@@ -9,6 +9,8 @@
 /// fixed-depth radix tree whose lookup path performs only atomic loads.
 /// @see docs/designs/04-page-cache.md, docs/designs/07-span-and-pagemap.md
 
+// Selects the sharded PageCache implementation. The single-mutex legacy
+// variant in the #else branch is retained only as a fallback.
 #define USE_PAGECACHE_SHARD
 
 #include "ammalloc/assert.h"
@@ -53,18 +55,23 @@ struct alignas(SystemConfig::PAGE_SIZE) RadixNode {
 ///
 /// `GetSpan` is a lock-free read path. Writers must hold the relevant PageCache
 /// shard lock while changing mappings; radix nodes are never reclaimed during
-/// normal concurrent operation.
+/// normal concurrent operation. A returned Span pointer is unpinned: callers
+/// must supply the object-lifetime pinning required to dereference it.
 class PageMap {
 public:
     /// @brief Looks up the Span managing a page without acquiring a lock.
     /// @param page_id Global page index.
-    /// @return Borrowed Span pointer, or null when the page is not mapped.
-    /// @note Acquire loads pair with release stores in `SetSpan`.
+    /// @return Unpinned borrowed Span pointer, or null when the page is not mapped.
+    /// @note Acquire loads pair with release stores in `SetSpan`. The caller
+    ///       may dereference the result only while holding the owning shard
+    ///       lock, a live small-object/cache pin through `Span::use_count`, the
+    ///       unique live large allocation, or allocator-wide quiescence.
     static Span* GetSpan(size_t page_id) noexcept;
 
     /// @brief Looks up the Span managing an address without acquiring a lock.
     /// @param ptr Address to locate.
-    /// @return Borrowed Span pointer, or null when the address is not mapped.
+    /// @return Unpinned borrowed Span pointer, or null when the address is not
+    ///         mapped.
     static Span* GetSpan(void* ptr) noexcept {
         return GetSpan(reinterpret_cast<uintptr_t>(ptr) >> SystemConfig::PAGE_SHIFT);
     }
@@ -91,10 +98,14 @@ public:
     /// @param start_page_id First page index to clear.
     /// @param page_num Number of consecutive pages to clear.
     /// @pre The owning PageCache shard lock is held.
+    /// @pre Before recycling a descriptor removed from this range, no
+    ///      unprotected PageMap reader retains it; existing callers rely on
+    ///      their object-ownership pinning.
     static void ClearRange(size_t start_page_id, size_t page_num) noexcept;
 
     /// @brief Clears the radix root and releases pooled internal nodes.
-    /// @pre All allocator users are quiescent and the caller serializes this reset.
+    /// @pre All allocator users, including PageMap borrowers, are quiescent and
+    ///      the caller serializes this reset.
     static void Reset() noexcept;
 
 #ifdef AMMALLOC_TEST
@@ -185,10 +196,14 @@ private:
     /// @brief Releases and coalesces a Span while the shard mutex is held.
     /// @param span Span owned by this shard.
     /// @pre `mutex_` is held and `span->owner_shard_id` identifies this shard.
+    /// @pre A small-object Span has `use_count == 0` after every user and cache
+    ///      object returned to its bitmap. A large Span is released once by its
+    ///      unique live allocation owner.
     void ReleaseSpanLocked(Span* span) noexcept;
 
     /// @brief Releases all free spans and pooled metadata owned by this shard.
-    /// @pre `mutex_` is held and allocator users are quiescent.
+    /// @pre `mutex_` is held and allocator users, including PageMap borrowers,
+    ///      are quiescent.
     void ResetLocked() noexcept;
 
     friend class PageCache;
@@ -225,10 +240,14 @@ public:
     /// @brief Returns a Span to its recorded owner shard for coalescing.
     /// @param span Span previously returned by `AllocSpan`.
     /// @pre `span` is non-null and not already released.
+    /// @pre Small-object Spans have no user, ThreadCache, or TransferCache
+    ///      object remaining; large Spans are released by their unique live
+    ///      allocation owner.
     void ReleaseSpan(Span* span) noexcept;
 
     /// @brief Releases free state from all active shards and resets PageMap.
-    /// @pre All allocator users are quiescent; intended for test isolation.
+    /// @pre All allocator users and PageMap borrowers are quiescent; intended
+    ///      for test isolation.
     void Reset() noexcept;
 
     /// @brief Reports whether one shard's page-count bucket is empty.
@@ -373,10 +392,12 @@ public:
     /// @brief Releases and coalesces a Span under the global mutex.
     /// @param span Span previously returned by `AllocSpan`.
     /// @pre `span` is non-null and not already released.
+    /// @pre Small-object Spans have no user or cached object remaining; large
+    ///      Spans are released by their unique live allocation owner.
     void ReleaseSpan(Span* span) noexcept;
 
     /// @brief Clears all free spans and resets PageMap for test isolation.
-    /// @pre All allocator users are quiescent.
+    /// @pre All allocator users and PageMap borrowers are quiescent.
     void Reset() noexcept;
 
     AM_NODISCARD bool IsBucketEmpty(size_t bucket_idx) const noexcept {

@@ -17,7 +17,13 @@ namespace ammalloc {
 /// coalescing. CentralCache borrows active Spans and uses the in-page bitmap for
 /// object allocation. The structure occupies one cache line. Fields are not
 /// atomic; callers must hold the owning PageCache shard lock or CentralCache
-/// bucket lock required by the current state.
+/// bucket lock required by the current state. A `PageMap::GetSpan()` result is
+/// an unpinned borrowed pointer: it may only be dereferenced while the caller
+/// holds the owner shard lock, holds a live small object (including an object in
+/// ThreadCache or TransferCache) counted by `use_count`, owns the sole live
+/// large allocation, or runs during allocator-wide quiescence. Generic
+/// unprotected PageMap observation is not supported by the current descriptor
+/// recycling protocol.
 struct alignas(SystemConfig::CACHE_LINE_SIZE) Span {
     // Intrusive linked list pointers for PageCache/SpanList.
     Span* next{nullptr};
@@ -34,7 +40,7 @@ struct alignas(SystemConfig::CACHE_LINE_SIZE) Span {
     // Object allocation metadata (valid when used by CentralCache).
     uint32_t aligned_obj_size{0};
     uint32_t capacity{0};   // Maximum objects stored in this Span.
-    uint32_t use_count{0};  // Objects currently absent from the Span bitmap (incl. user/caches).
+    uint32_t use_count{0};  // Small objects absent from the bitmap, pinning this descriptor.
     uint32_t scan_cursor{0};// First bitmap word that may contain a free bit.
 
     // Calculated data offset (avoids storing full pointer).
@@ -77,7 +83,8 @@ struct alignas(SystemConfig::CACHE_LINE_SIZE) Span {
         flags = (flags & ~kCommittedMask) | (committed ? kCommittedMask : 0);
     }
 
-    // Derive bitmap and data addresses to keep Span within one cache line.
+    // The following accessors derive bitmap and data addresses from page-base
+    // arithmetic instead of storing pointers, keeping Span within one cache line.
     /// @brief Returns the base address of the represented page range.
     /// @return Page-aligned base address.
     AM_NODISCARD AM_ALWAYS_INLINE void* GetPageBaseAddr() const noexcept {
