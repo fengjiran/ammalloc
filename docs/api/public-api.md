@@ -21,7 +21,7 @@
 | 简介 | 将先前由 `am_malloc` 分配的存储归还分配器（对应 `@brief`） |
 | 参数 | `ptr`：`am_malloc` 返回的指针；`nullptr` 作为 no-op 接受（对应 `@param`） |
 | 返回值 | 无 |
-| 语义 | 只接受 `am_malloc` 返回的原始存活指针；与系统 `free` 混用、释放内部指针、double-free 均不支持；PageMap 无法识别的指针被忽略（对应 `@note`） |
+| 语义 | 只接受 `am_malloc` 返回的原始存活指针；与系统 `free` 混用、释放内部指针、double-free 均不支持；PageMap 无法识别的指针被忽略。Hardened 构建可拒绝部分非法释放，但不改变这些输入未定义的 API 契约（对应 `@note`） |
 | 前置条件 | `ptr` 必须是 `am_malloc` 返回且尚未释放的指针（对应 `@pre`） |
 
 ### 示例

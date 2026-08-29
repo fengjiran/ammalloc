@@ -170,6 +170,41 @@ TEST(AmMallocHardeningTest, SmallObjectInteriorPointerDeath) {
 #endif
 }
 
+// This models the state after a small Span's final object returned to its
+// bitmap and CentralCache handed it back to PageCache. A second free must
+// reject the retained free-Span mapping before examining recycled metadata.
+TEST(AmMallocHardeningTest, ReleasedSmallSpanSecondFreeDeath) {
+#if defined(AM_HARDENED) || !defined(NDEBUG)
+    auto& cache = PageCache::GetInstance();
+    auto* span = cache.AllocSpan(1);
+    ASSERT_NE(span, nullptr);
+    span->Init(64);
+
+    void* p = span->AllocObject();
+    ASSERT_NE(p, nullptr);
+    span->FreeObject(p);
+    cache.ReleaseSpan(span);
+
+    EXPECT_DEATH(am_free(p), "Check failed");
+#endif
+}
+
+// An uncarved PageCache Span follows am_free's large-object branch because its
+// aligned_obj_size is zero. Retaining this cacheable range exercises the
+// used-state check; direct-mapped large allocations clear their PageMap entry
+// and remain unsupported rather than deterministically detectable on reuse.
+TEST(AmMallocHardeningTest, ReleasedLargeSpanSecondFreeDeath) {
+#if defined(AM_HARDENED) || !defined(NDEBUG)
+    auto& cache = PageCache::GetInstance();
+    auto* span = cache.AllocSpan(1);
+    ASSERT_NE(span, nullptr);
+    void* p = span->GetPageBaseAddr();
+
+    am_free(p);
+    EXPECT_DEATH(am_free(p), "Check failed");
+#endif
+}
+
 // am_free cross-checks span->size_class_idx against span->aligned_obj_size
 // before pushing into ThreadCache, so corrupted Span metadata aborts instead
 // of feeding the object into a wrong-size class. The corruption happens in the

@@ -168,6 +168,14 @@ void am_free(void* ptr) {
         return;
     }
 
+    AM_HCHECK(span->IsUsed(), "Pointer belongs to a released Span.");
+#if defined(AM_HARDENED) || !defined(NDEBUG)
+    const auto ptr_page = reinterpret_cast<uintptr_t>(ptr) >> SystemConfig::PAGE_SHIFT;
+    AM_HCHECK(ptr_page >= span->start_page_idx &&
+                      ptr_page - span->start_page_idx < span->page_num,
+              "Pointer lies outside the mapped Span.");
+#endif
+
     const auto aligned_size = span->aligned_obj_size;
     const size_t idx = span->size_class_idx;
     AM_HCHECK(aligned_size == 0 ||

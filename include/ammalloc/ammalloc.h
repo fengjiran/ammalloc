@@ -17,7 +17,10 @@ void* am_malloc(size_t original_size);
 
 /// @brief Returns storage previously allocated by `am_malloc` to the allocator.
 /// @param ptr Pointer returned by `am_malloc`; null is accepted as a no-op.
+/// @pre `ptr` is null or the original live pointer returned by `am_malloc`.
 /// @note Pointers not recognized by the allocator's page map are ignored.
+///       Interior pointers and double frees are unsupported even when a
+///       hardened build rejects some of them.
 void am_free(void* ptr);
 
 }// namespace ammalloc
