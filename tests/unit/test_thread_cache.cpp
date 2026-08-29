@@ -325,7 +325,6 @@ void ThreadRoutine(int thread_id, size_t iterations) {
 
 TEST_F(ThreadCacheTest, MultiThreadStress) {
     const int num_threads = std::thread::hardware_concurrency();
-    // const int num_threads = 1;
     const size_t iterations_per_thread = 50000;// 50k operations per thread
 
     auto start_time = std::chrono::high_resolution_clock::now();
@@ -506,7 +505,6 @@ TEST_F(ThreadCacheTest, BenchmarkVsStdMalloc) {
     auto start_std = std::chrono::high_resolution_clock::now();
     for (size_t i = 0; i < iterations; ++i) {
         void* p = std::malloc(alloc_size);
-        // benchmark::DoNotOptimize(p);// prevents the compiler from optimizing it away (would need the benchmark library, or volatile)
         std::free(p);
     }
 
@@ -518,7 +516,6 @@ TEST_F(ThreadCacheTest, BenchmarkVsStdMalloc) {
     auto start_tc = std::chrono::high_resolution_clock::now();
     for (size_t i = 0; i < iterations; ++i) {
         void* p = tc.Allocate(alloc_size);
-        // benchmark::DoNotOptimize(p);
         tc.Deallocate(p, SizeClass::Index(alloc_size));
     }
     tc.ReleaseAll();
@@ -527,10 +524,6 @@ TEST_F(ThreadCacheTest, BenchmarkVsStdMalloc) {
 
     std::cout << " Time: " << diff_std.count() << " s\n";
     std::cout << " Time: " << diff_tc.count() << " s\n";
-
-    // ThreadCache is usually much faster than std::malloc because it is all
-    // lock-free array/list operations.
-    // EXPECT_LT(diff_tc.count(), diff_std.count());
 }
 
 // The per-class quota stays bounded under sustained mixed pressure: never zero

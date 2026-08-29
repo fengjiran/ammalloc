@@ -177,7 +177,8 @@ public:
     /// - `Size(Index(s)) >= s` for all valid sizes (not strict equality)
     ///
     /// Size is therefore a right-inverse of Index, but not a strict bijection:
-    /// Index maps multiple sizes to the same class (e.g., 129→16, 160→16).
+    /// Index maps multiple sizes to the same class (e.g., both 129 and 160 map
+    /// to `kLinearBucketCount`).
     ///
     /// @param idx The size class index to be decoded.
     /// @return The maximum byte size of the objects stored in this size class's FreeList.

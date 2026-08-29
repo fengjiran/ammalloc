@@ -1,6 +1,3 @@
-//
-// Created by richard on 2/19/26.
-//
 #include "ammalloc/central_cache.h"
 #include "ammalloc/page_allocator.h"
 #include "ammalloc/page_cache.h"
@@ -31,7 +28,7 @@ protected:
     }
 };
 
-// 测试点 1: 基本的 FetchRange 操作
+// Point 1: basic FetchRange.
 TEST_F(CentralCacheTest, BasicFetchRange) {
     FreeList list;
     size_t obj_size = 16;
@@ -42,7 +39,7 @@ TEST_F(CentralCacheTest, BasicFetchRange) {
     EXPECT_GT(fetched, 0);
     EXPECT_EQ(list.size(), fetched);
 
-    // 清理
+    // Clean up.
     void* head = nullptr;
     while (!list.empty()) {
         void* obj = list.pop();
@@ -53,7 +50,7 @@ TEST_F(CentralCacheTest, BasicFetchRange) {
     central_cache_.ReleaseListToSpans(head, obj_size);
 }
 
-// 测试点 2: FetchRange 多次调用
+// Point 2: repeated FetchRange calls.
 TEST_F(CentralCacheTest, MultipleFetchRange) {
     FreeList list;
     size_t obj_size = 32;
@@ -65,7 +62,7 @@ TEST_F(CentralCacheTest, MultipleFetchRange) {
 
     EXPECT_GE(list.size(), 50);
 
-    // 清理
+    // Clean up.
     void* head = nullptr;
     while (!list.empty()) {
         void* obj = list.pop();
@@ -76,17 +73,17 @@ TEST_F(CentralCacheTest, MultipleFetchRange) {
     central_cache_.ReleaseListToSpans(head, obj_size);
 }
 
-// 测试点 3: ReleaseListToSpans 基本操作
+// Point 3: basic ReleaseListToSpans.
 TEST_F(CentralCacheTest, BasicReleaseListToSpans) {
     FreeList list;
     size_t obj_size = 64;
     size_t batch_num = 10;
 
-    // 先获取一些对象
+    // Fetch some objects first.
     size_t fetched = central_cache_.FetchRange(list, batch_num, obj_size);
     ASSERT_GT(fetched, 0);
 
-    // 构建释放链表
+    // Build the release chain.
     void* head = nullptr;
     while (!list.empty()) {
         void* obj = list.pop();
@@ -95,10 +92,10 @@ TEST_F(CentralCacheTest, BasicReleaseListToSpans) {
         head = obj;
     }
 
-    // 释放回 CentralCache
+    // Return them to CentralCache.
     central_cache_.ReleaseListToSpans(head, obj_size);
 
-    // 验证：再次获取应该能成功
+    // Verify: fetching again must succeed.
     size_t fetched2 = central_cache_.FetchRange(list, batch_num, obj_size);
     EXPECT_GT(fetched2, 0);
 
@@ -112,7 +109,7 @@ TEST_F(CentralCacheTest, BasicReleaseListToSpans) {
     central_cache_.ReleaseListToSpans(head, obj_size);
 }
 
-// 测试点 4: 不同 Size Class 的分配
+// Point 4: allocation across size classes.
 TEST_F(CentralCacheTest, DifferentSizeClasses) {
     std::vector<size_t> sizes = {16, 32, 64, 128, 160, 256, 512, 1024, 2048, 4096};
 
@@ -132,7 +129,7 @@ TEST_F(CentralCacheTest, DifferentSizeClasses) {
     }
 }
 
-// 测试点 5: 大批量分配
+// Point 5: large-batch allocation.
 TEST_F(CentralCacheTest, LargeBatchAllocation) {
     FreeList list;
     size_t obj_size = 128;
@@ -141,7 +138,7 @@ TEST_F(CentralCacheTest, LargeBatchAllocation) {
     size_t fetched = central_cache_.FetchRange(list, batch_num, obj_size);
     EXPECT_GT(fetched, 0);
 
-    // 验证所有对象都是有效的
+    // Verify every object is valid.
     void* head = nullptr;
     size_t count = 0;
     while (!list.empty()) {
@@ -156,15 +153,15 @@ TEST_F(CentralCacheTest, LargeBatchAllocation) {
     EXPECT_EQ(count, fetched);
 }
 
-// 测试点 6: Reset 功能
+// Point 6: Reset.
 TEST_F(CentralCacheTest, Reset) {
     FreeList list;
     size_t obj_size = 256;
 
-    // 分配一些对象
+    // Allocate some objects.
     central_cache_.FetchRange(list, 10, obj_size);
 
-    // 清空 list
+    // Drain the list.
     void* head = nullptr;
     while (!list.empty()) {
         void* obj = list.pop();
@@ -174,14 +171,14 @@ TEST_F(CentralCacheTest, Reset) {
     }
     central_cache_.ReleaseListToSpans(head, obj_size);
 
-    // Reset CentralCache
+    // Reset CentralCache.
     central_cache_.Reset();
 
-    // 再次分配应该仍然正常工作
+    // Allocation must keep working afterwards.
     size_t fetched = central_cache_.FetchRange(list, 10, obj_size);
     EXPECT_GT(fetched, 0);
 
-    // 清理
+    // Clean up.
     head = nullptr;
     while (!list.empty()) {
         void* obj = list.pop();
@@ -209,16 +206,16 @@ TEST_F(CentralCacheTest, TransferCacheOomDegradesToSpanList) {
     central_cache_.ReleaseListToSpans(object, 64);
 }
 
-// 测试点 7: 对象归还后再次分配
+// Point 7: reallocate after returning objects.
 TEST_F(CentralCacheTest, ReallocateAfterRelease) {
     FreeList list;
     size_t obj_size = 512;
 
-    // 第一次分配
+    // First allocation.
     size_t fetched1 = central_cache_.FetchRange(list, 20, obj_size);
     ASSERT_GT(fetched1, 0);
 
-    // 构建释放链表
+    // Build the release chain.
     void* head = nullptr;
     while (!list.empty()) {
         void* obj = list.pop();
@@ -227,14 +224,14 @@ TEST_F(CentralCacheTest, ReallocateAfterRelease) {
         head = obj;
     }
 
-    // 释放
+    // Release.
     central_cache_.ReleaseListToSpans(head, obj_size);
 
-    // 第二次分配
+    // Second allocation.
     size_t fetched2 = central_cache_.FetchRange(list, 20, obj_size);
     ASSERT_GT(fetched2, 0);
 
-    // 清理
+    // Clean up.
     head = nullptr;
     while (!list.empty()) {
         void* obj = list.pop();
@@ -245,14 +242,14 @@ TEST_F(CentralCacheTest, ReallocateAfterRelease) {
     central_cache_.ReleaseListToSpans(head, obj_size);
 }
 
-// 测试点 8: 压力测试
+// Point 8: stress test.
 TEST_F(CentralCacheTest, StressTest) {
     std::vector<std::pair<void*, size_t>> allocated;
     std::mt19937 g(42);
     std::uniform_int_distribution<> size_dis(8, 1024);
     std::uniform_int_distribution<> batch_dis(1, 50);
 
-    // 随机分配
+    // Allocate randomly.
     for (int i = 0; i < 100; ++i) {
         size_t obj_size = size_dis(g);
         obj_size = SizeClass::RoundUp(obj_size);
@@ -267,10 +264,10 @@ TEST_F(CentralCacheTest, StressTest) {
         }
     }
 
-    // 随机释放
+    // Release in random order.
     std::shuffle(allocated.begin(), allocated.end(), g);
 
-    // 按大小分组释放
+    // Group releases by size.
     std::map<size_t, void*> release_lists;
     std::map<size_t, void*> release_tails;
     std::map<size_t, size_t> release_counts;
@@ -293,7 +290,7 @@ TEST_F(CentralCacheTest, StressTest) {
     }
 }
 
-// 测试点 9: 多线程分配
+// Point 9: multi-threaded allocation.
 TEST_F(CentralCacheTest, MultiThreadedAllocation) {
     constexpr int num_threads = 4;
     constexpr int allocations_per_thread = 100;
@@ -310,7 +307,7 @@ TEST_F(CentralCacheTest, MultiThreadedAllocation) {
                 if (fetched > 0) {
                     success_count.fetch_add(fetched);
                 }
-                // 清理
+                // Clean up.
                 void* head = nullptr;
                 while (!list.empty()) {
                     void* obj = list.pop();
@@ -330,14 +327,14 @@ TEST_F(CentralCacheTest, MultiThreadedAllocation) {
     EXPECT_EQ(success_count.load(), num_threads * allocations_per_thread * 10);
 }
 
-// 测试点 10: FreeList 基本操作
+// Point 10: basic FreeList operations.
 TEST_F(CentralCacheTest, FreeListOperations) {
     FreeList list;
 
     EXPECT_TRUE(list.empty());
     EXPECT_EQ(list.size(), 0);
 
-    // 使用实际分配的内存来测试
+    // Exercise the list with real allocated memory.
     size_t obj_size = 64;
     FreeList source;
     central_cache_.FetchRange(source, 5, obj_size);
@@ -363,12 +360,12 @@ TEST_F(CentralCacheTest, FreeListOperations) {
     EXPECT_EQ(list.size(), 0);
 }
 
-// 测试点 11: FreeList push_range 和 pop_range
+// Point 11: FreeList push_range and pop_range.
 TEST_F(CentralCacheTest, FreeListPushRange) {
     FreeList list;
     size_t obj_size = 64;
 
-    // 从 CentralCache 获取对象
+    // Fetch objects from CentralCache.
     FreeList source;
     central_cache_.FetchRange(source, 5, obj_size);
 
@@ -376,7 +373,7 @@ TEST_F(CentralCacheTest, FreeListPushRange) {
     void* b = source.pop();
     void* c = source.pop();
 
-    // 构建链表: a -> b -> c
+    // Build the chain: a -> b -> c.
     auto* head = static_cast<FreeBlock*>(a);
     auto* node2 = static_cast<FreeBlock*>(b);
     auto* tail = static_cast<FreeBlock*>(c);
@@ -394,7 +391,7 @@ TEST_F(CentralCacheTest, FreeListPushRange) {
     EXPECT_TRUE(list.empty());
 }
 
-// 测试点 12: FreeList max_size
+// Point 12: FreeList max_size.
 TEST_F(CentralCacheTest, FreeListMaxSize) {
     FreeList list;
 
@@ -407,15 +404,16 @@ TEST_F(CentralCacheTest, FreeListMaxSize) {
     EXPECT_EQ(list.max_size(), 1000);
 }
 
-// 测试点 13: 小对象分配（8 字节请求映射到最小 16 字节类）
+// Point 13: small-object allocation (an 8-byte request maps to the smallest
+// 16-byte class).
 TEST_F(CentralCacheTest, SmallObjectAllocation) {
     FreeList list;
-    size_t obj_size = SizeClass::RoundUp(8);// 8 映射到 16 字节类，Span 按类别尺寸雕刻
+    size_t obj_size = SizeClass::RoundUp(8);// 8 maps to the 16-byte class; the Span is carved at that class size.
 
     size_t fetched = central_cache_.FetchRange(list, 50, obj_size);
     EXPECT_GT(fetched, 0);
 
-    // 清理
+    // Clean up.
     void* head = nullptr;
     while (!list.empty()) {
         void* obj = list.pop();
@@ -426,16 +424,16 @@ TEST_F(CentralCacheTest, SmallObjectAllocation) {
     central_cache_.ReleaseListToSpans(head, obj_size);
 }
 
-// 测试点 14: 边界大小分配
+// Point 14: boundary-size allocation.
 TEST_F(CentralCacheTest, BoundarySizeAllocation) {
-    // 测试 ThreadCache 最大支持的大小
+    // Test the largest ThreadCache size.
     size_t max_size = SizeConfig::MAX_TC_SIZE;
 
     FreeList list;
     size_t fetched = central_cache_.FetchRange(list, 10, max_size);
     EXPECT_GT(fetched, 0);
 
-    // 清理
+    // Clean up.
     void* head = nullptr;
     while (!list.empty()) {
         void* obj = list.pop();
@@ -477,7 +475,7 @@ TEST_F(CentralCacheTest, FetchRangeReturnsPartialOnShortSupply) {
     EXPECT_EQ(fetched, capacity - 1);
     EXPECT_EQ(list.size(), capacity - 1);
 
-    // 清理
+    // Clean up.
     void* head = nullptr;
     while (!one.empty()) {
         void* obj = one.pop();

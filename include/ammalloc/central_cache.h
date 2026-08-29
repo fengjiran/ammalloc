@@ -128,6 +128,8 @@ private:
     static Span* GetOneSpan(Bucket& bucket, size_t aligned_size,
                             detail::NoThrowUniqueLock& lock) noexcept;
 
+    /// TransferCache capacity per bucket, expressed as a multiple of the
+    /// class batch size.
     constexpr static size_t kCapScale = 8;
     /// One independently synchronized bucket per size class.
     std::array<Bucket, SizeClass::kNumSizeClasses> buckets_{};

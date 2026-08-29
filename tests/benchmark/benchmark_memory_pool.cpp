@@ -131,25 +131,26 @@ void BM_std_malloc_free_pair_random_size(benchmark::State& state) {
     }
 }
 
-// 1. 测试极致 Fast Path (Window = 1)
-// 每次循环都是 malloc -> free -> malloc -> free
-// 测量的是纯 malloc+free 开销
+// 1. Extreme fast path (Window = 1).
+// Each loop iteration is malloc -> free -> malloc -> free, measuring the pure
+// malloc+free overhead.
 BENCHMARK_TEMPLATE(BM_Malloc_Churn, 8, 1, am_malloc, am_free);
 BENCHMARK_TEMPLATE(BM_Malloc_Churn, 8, 1, std::malloc, std::free);
 
 BENCHMARK_TEMPLATE(BM_Malloc_Churn, 64, 1, am_malloc, am_free);
 BENCHMARK_TEMPLATE(BM_Malloc_Churn, 64, 1, std::malloc, std::free);
 
-// 2. 测试 ThreadCache 稳态吞吐 (Window = 256)
-// 对象在 ThreadCache 内部循环，不触发 CentralCache
+// 2. ThreadCache steady-state throughput (Window = 256).
+// Objects cycle inside ThreadCache without touching CentralCache.
 BENCHMARK_TEMPLATE(BM_Malloc_Churn, 8, 256, am_malloc, am_free);
 BENCHMARK_TEMPLATE(BM_Malloc_Churn, 8, 256, std::malloc, std::free);
 
 BENCHMARK_TEMPLATE(BM_Malloc_Churn, 64, 256, am_malloc, am_free);
 BENCHMARK_TEMPLATE(BM_Malloc_Churn, 64, 256, std::malloc, std::free);
 
-// 3. 测试系统综合搅动率 (Window = 1024)
-// 强制触发 ThreadCache 溢出，测试 CentralCache 桶锁和批量搬运性能
+// 3. System-wide churn (Window = 1024).
+// Forces ThreadCache overflow, exercising CentralCache bucket locks and batch
+// transfers.
 BENCHMARK_TEMPLATE(BM_Malloc_Churn, 8, 1024, am_malloc, am_free);
 BENCHMARK_TEMPLATE(BM_Malloc_Churn, 8, 1024, std::malloc, std::free);
 
@@ -159,35 +160,36 @@ BENCHMARK_TEMPLATE(BM_Malloc_Churn, 4096, 1024, std::malloc, std::free);
 BENCHMARK(BM_am_malloc_free_pair_random_size);
 BENCHMARK(BM_std_malloc_free_pair_random_size);
 
-// 注册测试：BatchSize 设置为 2000，远超 ThreadCache 的 max_size (512)
-// 这将绝对触发 CentralCache 的慢速路径！
+// Registered test: BatchSize 2000 far exceeds ThreadCache's max_size (512),
+// so this always hits the CentralCache slow path.
 BENCHMARK_TEMPLATE(BM_Malloc_Deep_Churn, 8, 2000, am_malloc, am_free);
 BENCHMARK_TEMPLATE(BM_Malloc_Deep_Churn, 8, 2000, std::malloc, std::free);
 
-// 模板参数：Size (分配大小), BatchSize (单线程一次循环分配的数量)
+// Template parameters: Size (allocation size), BatchSize (per-loop allocation
+// count).
 template<size_t Size, size_t BatchSize>
 void BM_am_malloc_multithread(benchmark::State& state) {
-    // 这里的代码，Google Benchmark 会自动在 N 个线程中并发执行！
-    // 每个线程都有自己独立的 state 和局部变量。
-    // 注意：BatchSize 不能太大（例如超过 100,000），否则可能导致线程栈溢出 (Stack Overflow)。
-    // 对于 BatchSize = 1000，数组大小为 8KB，在栈上绝对安全。
+    // Google Benchmark runs this body concurrently in N threads; each thread
+    // gets its own state and local variables.
+    // Note: BatchSize must stay small enough to fit on the thread stack (e.g.
+    // > 100,000 would overflow it). BatchSize = 1000 is an 8 KB array, safe.
     std::array<void*, BatchSize> local_ptrs{};
 
-    // 核心测试循环
+    // Core benchmark loop.
     for (auto _: state) {
-        // 1. 批量分配 (模拟潮汐并发)
+        // 1. Batch allocation (simulates tidal concurrency).
         for (size_t i = 0; i < BatchSize; ++i) {
             local_ptrs[i] = am_malloc(Size);
-            benchmark::DoNotOptimize(local_ptrs[i]);// 防止被编译器优化掉
+            benchmark::DoNotOptimize(local_ptrs[i]);// Prevents the compiler from optimizing the result away.
         }
 
-        // 2. 批量释放
+        // 2. Batch release.
         for (void* p: local_ptrs) {
             am_free(p);
         }
     }
 
-    // 告诉框架我们实际处理了多少字节，方便输出吞吐量 (MB/s)
+    // Report bytes processed so the framework can print throughput (MB/s).
     state.SetBytesProcessed(state.iterations() * static_cast<int64_t>(BatchSize) * static_cast<int64_t>(Size));
 }
 
@@ -207,13 +209,13 @@ void BM_std_malloc_multithread(benchmark::State& state) {
     state.SetBytesProcessed(state.iterations() * static_cast<int64_t>(BatchSize) * static_cast<int64_t>(Size));
 }
 
-// 真实世界模拟：多线程 + 随机大小
+// Real-world simulation: multiple threads + random sizes.
 template<size_t BatchSize>
 void BM_am_malloc_multithread_random(benchmark::State& state) {
     constexpr size_t kNumSizes = 8192;
     std::array<size_t, kNumSizes> sizes;
-    std::mt19937 rng(state.thread_index());             // 每个线程不同种子
-    std::uniform_int_distribution<size_t> dist(1, 1024);// 1B ~ 1KB 随机
+    std::mt19937 rng(state.thread_index());             // Distinct seed per thread.
+    std::uniform_int_distribution<size_t> dist(1, 1024);// Random 1B..1KB requests.
     for (size_t i = 0; i < kNumSizes; ++i) sizes[i] = dist(rng);
 
     std::array<void*, BatchSize> local_ptrs{};
@@ -231,12 +233,12 @@ void BM_am_malloc_multithread_random(benchmark::State& state) {
 }
 
 // ============================================================================
-// 注册测试用例 (使用 UseRealTime 获取真实的并发挂钟时间)
+// Registered test cases (UseRealTime reports true concurrent wall time).
 // ============================================================================
 
-// 测试 8 字节，每次循环分配 1000 个
-// ->Threads(N) 表示启动 N 个线程同时执行这个函数
-// ->UseRealTime() 告诉框架使用挂钟时间(Wall Time)而不是 CPU 时间(会把多核时间累加)
+// Test 8 bytes, allocating 1000 per loop.
+// ->Threads(N) runs the function in N concurrent threads.
+// ->UseRealTime() measures wall time instead of per-core CPU time.
 BENCHMARK_TEMPLATE(BM_am_malloc_multithread, 8, 1000)
         ->Threads(1)
         ->Threads(2)
@@ -253,7 +255,7 @@ BENCHMARK_TEMPLATE(BM_std_malloc_multithread, 8, 1000)
         ->Threads(16)
         ->UseRealTime();
 
-// 测试 64 字节
+// Test 64 bytes.
 BENCHMARK_TEMPLATE(BM_am_malloc_multithread, 64, 1000)
         ->Threads(1)
         ->Threads(2)
