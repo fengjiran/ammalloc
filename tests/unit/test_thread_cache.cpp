@@ -5,9 +5,9 @@
 #include "ammalloc/thread_cache.h"
 
 #include <cstdlib>
-#include <random>
-
 #include <gtest/gtest.h>
+#include <random>
+#include <ranges>
 
 namespace {
 using namespace ammalloc;
@@ -130,15 +130,15 @@ TEST_F(ThreadCacheTest, MultipleAllocateDeallocate) {
     std::vector<void*> ptrs;
     constexpr size_t size = SizeClass::RoundUp(64);
 
-    for (int i = 0; i < num_allocs; ++i) {
+    for ([[maybe_unused]] int i : std::views::iota(0, num_allocs)) {
         void* ptr = cache.Allocate(size);
         EXPECT_TRUE(ptr != nullptr);
         ptrs.push_back(ptr);
     }
 
-    for (void* ptr: ptrs) {
+    std::ranges::for_each(ptrs, [&](void* ptr) {
         cache.Deallocate(ptr, SizeClass::Index(size));
-    }
+    });
 
     cache.ReleaseAll();
 }
@@ -164,7 +164,7 @@ TEST_F(ThreadCacheTest, ReleaseAll) {
     constexpr size_t size = SizeClass::RoundUp(128);
 
     // Allocate some objects without freeing them.
-    for (int i = 0; i < 50; ++i) {
+    for ([[maybe_unused]] int i : std::views::iota(0, 50)) {
         void* ptr = cache.Allocate(size);
         EXPECT_TRUE(ptr != nullptr);
         // Intentionally not freed; ReleaseAll below reclaims them.
@@ -183,28 +183,28 @@ TEST_F(ThreadCacheTest, ReleaseAll) {
 TEST_F(ThreadCacheTest, SlowStartAndScavenge) {
     thread_local ThreadCache tc;
     size_t size = SizeClass::RoundUp(8);// smallest object; batch_num is usually 512
-    size_t batch_num = SizeClass::CalculateBatchSize(size);
 
     std::vector<void*> ptrs;
 
     // 1. Allocate continuously to trigger slow-start growth.
     // Allocating 1500 objects forces multiple FetchFromCentralCache calls.
-    for (size_t i = 0; i < 1500; ++i) {
+    for ([[maybe_unused]] size_t i : std::views::iota(size_t(0), size_t(1500))) {
         void* ptr = tc.Allocate(size);
         EXPECT_TRUE(ptr != nullptr);
         ptrs.push_back(ptr);
     }
 
-    // Verify all allocated pointers are distinct.
-    std::sort(ptrs.begin(), ptrs.end());
-    auto it = std::unique(ptrs.begin(), ptrs.end());
-    EXPECT_EQ(it, ptrs.end()) << "Duplicate pointers allocated!";
+    // Verify all allocated pointers are distinct (duplicates are adjacent
+    // after sorting).
+    std::ranges::sort(ptrs);
+    EXPECT_TRUE(std::ranges::adjacent_find(ptrs) == ptrs.end())
+            << "Duplicate pointers allocated!";
 
     // 2. Deallocate continuously to trigger the release-too-long path.
     // Once the freed count exceeds the limit (1024), objects are returned in bulk.
-    for (void* ptr: ptrs) {
+    std::ranges::for_each(ptrs, [&](void* ptr) {
         tc.Deallocate(ptr, SizeClass::Index(size));
-    }
+    });
 
     // 3. Clean up leftovers.
     tc.ReleaseAll();
@@ -218,16 +218,16 @@ TEST_F(ThreadCacheTest, TriggerReleaseTooLongList) {
 
     // Allocate enough objects.
     std::vector<void*> ptrs;
-    for (size_t i = 0; i < batch_size * 4; ++i) {
+    for ([[maybe_unused]] size_t i : std::views::iota(size_t(0), batch_size * 4)) {
         void* ptr = cache.Allocate(size);
         EXPECT_TRUE(ptr != nullptr);
         ptrs.push_back(ptr);
     }
 
     // Deallocate all objects to trigger the release-too-long path.
-    for (void* ptr: ptrs) {
+    std::ranges::for_each(ptrs, [&](void* ptr) {
         cache.Deallocate(ptr, SizeClass::Index(size));
-    }
+    });
 
     cache.ReleaseAll();
 }
@@ -258,7 +258,7 @@ TEST_F(ThreadCacheTest, SlowStartGrowthThenOveragesShrinkMaxSize) {
             << "max_size failed to grow far enough beyond batch size";
 
     const size_t extra_allocations = batch_num * 8;
-    for (size_t i = 0; i < extra_allocations; ++i) {
+    for ([[maybe_unused]] size_t i : std::views::iota(size_t(0), extra_allocations)) {
         void* ptr = cache.Allocate(size);
         ASSERT_NE(ptr, nullptr);
         ptrs.push_back(ptr);
@@ -307,10 +307,10 @@ TEST_F(ThreadCacheTest, StressTest) {
     }
 
     // Random deallocation.
-    std::shuffle(allocated.begin(), allocated.end(), g);
-    for (auto& [ptr, size]: allocated) {
-        cache.Deallocate(ptr, SizeClass::Index(size));
-    }
+    std::ranges::shuffle(allocated, g);
+    std::ranges::for_each(allocated, [&](std::pair<void*, size_t> entry) {
+        cache.Deallocate(entry.first, SizeClass::Index(entry.second));
+    });
 
     cache.ReleaseAll();
 }
@@ -353,10 +353,10 @@ void ThreadRoutine(int thread_id, size_t iterations) {
     }
 
     // Free all remaining memory before the thread exits.
-    for (void* ptr: allocated_ptrs) {
+    std::ranges::for_each(allocated_ptrs, [&](void* ptr) {
         size_t aligned_size = *static_cast<size_t*>(ptr);
         tc.Deallocate(ptr, SizeClass::Index(aligned_size));
-    }
+    });
 
     // Return the ThreadCache objects to CentralCache.
     tc.ReleaseAll();
@@ -396,7 +396,7 @@ TEST_F(ThreadCacheTest, MultiThreadedAllocation) {
     std::vector<std::thread> threads;
     std::atomic<int> success_count{0};
 
-    for (int t = 0; t < num_threads; ++t) {
+    for ([[maybe_unused]] int t : std::views::iota(0, num_threads)) {
         threads.emplace_back([&success_count]() {
             thread_local ThreadCache cache;
             for (int i = 0; i < allocations_per_thread; ++i) {
@@ -454,7 +454,7 @@ TEST_F(ThreadCacheTest, SmallObjectAllocation) {
     thread_local ThreadCache cache;
     constexpr size_t size = SizeClass::RoundUp(8);
 
-    for (int i = 0; i < 100; ++i) {
+    for ([[maybe_unused]] int i : std::views::iota(0, 100)) {
         void* ptr = cache.Allocate(size);
         EXPECT_NE(ptr, nullptr);
         cache.Deallocate(ptr, SizeClass::Index(size));
@@ -480,16 +480,16 @@ TEST_F(ThreadCacheTest, RepeatedAllocateDeallocate) {
     thread_local ThreadCache cache;
     size_t size = SizeClass::RoundUp(128);
 
-    for (int round = 0; round < 10; ++round) {
+    for ([[maybe_unused]] int round : std::views::iota(0, 10)) {
         std::vector<void*> ptrs;
-        for (int i = 0; i < 20; ++i) {
+        for ([[maybe_unused]] int i : std::views::iota(0, 20)) {
             void* ptr = cache.Allocate(size);
             EXPECT_NE(ptr, nullptr);
             ptrs.push_back(ptr);
         }
-        for (void* ptr: ptrs) {
+        std::ranges::for_each(ptrs, [&](void* ptr) {
             cache.Deallocate(ptr, SizeClass::Index(size));
-        }
+        });
     }
 
     cache.ReleaseAll();
@@ -504,15 +504,15 @@ TEST_F(ThreadCacheTest, FetchFromCentralCacheTrigger) {
     size_t batch_size = SizeClass::CalculateBatchSize(size);
     std::vector<void*> ptrs;
 
-    for (size_t i = 0; i < batch_size * 3; ++i) {
+    for ([[maybe_unused]] size_t i : std::views::iota(size_t(0), batch_size * 3)) {
         void* ptr = cache.Allocate(size);
         EXPECT_NE(ptr, nullptr);
         ptrs.push_back(ptr);
     }
 
-    for (void* ptr: ptrs) {
+    std::ranges::for_each(ptrs, [&](void* ptr) {
         cache.Deallocate(ptr, SizeClass::Index(size));
-    }
+    });
 
     cache.ReleaseAll();
 }
@@ -542,7 +542,7 @@ TEST_F(ThreadCacheTest, BenchmarkVsStdMalloc) {
 
     // 1. Test std::malloc.
     auto start_std = std::chrono::high_resolution_clock::now();
-    for (size_t i = 0; i < iterations; ++i) {
+    for ([[maybe_unused]] size_t i : std::views::iota(size_t(0), iterations)) {
         void* p = std::malloc(alloc_size);
         std::free(p);
     }
@@ -553,7 +553,7 @@ TEST_F(ThreadCacheTest, BenchmarkVsStdMalloc) {
     // 2. Test ThreadCache.
     thread_local ThreadCache tc;
     auto start_tc = std::chrono::high_resolution_clock::now();
-    for (size_t i = 0; i < iterations; ++i) {
+    for ([[maybe_unused]] size_t i : std::views::iota(size_t(0), iterations)) {
         void* p = tc.Allocate(alloc_size);
         tc.Deallocate(p, SizeClass::Index(alloc_size));
     }
@@ -575,13 +575,13 @@ TEST_F(ThreadCacheTest, MaxSizeStaysBoundedUnderSustainedLoad) {
     const size_t batch = SizeClass::CalculateBatchSize(size);
 
     std::vector<void*> held;
-    for (int round = 0; round < 200; ++round) {
-        for (int i = 0; i < 64; ++i) {
+    for ([[maybe_unused]] int round : std::views::iota(0, 200)) {
+        for ([[maybe_unused]] int i : std::views::iota(0, 64)) {
             void* p = tc.Allocate(size);
             ASSERT_NE(p, nullptr);
             held.push_back(p);
         }
-        for (int i = 0; i < 32; ++i) {
+        for ([[maybe_unused]] int i : std::views::iota(0, 32)) {
             tc.Deallocate(held.back(), idx);
             held.pop_back();
         }
@@ -591,7 +591,7 @@ TEST_F(ThreadCacheTest, MaxSizeStaysBoundedUnderSustainedLoad) {
         EXPECT_LE(ms, batch * quota_policy::kMaxQuotaBatches);
     }
 
-    for (void* p: held) tc.Deallocate(p, idx);
+    std::ranges::for_each(held, [&](void* p) { tc.Deallocate(p, idx); });
     tc.ReleaseAll();
 }
 
@@ -632,11 +632,11 @@ TEST_F(ThreadCacheTest, AggregateQuotaBudgetBoundsAllSizeClasses) {
 
     std::vector<std::pair<void*, size_t>> held;
     held.reserve(SizeClass::kNumSizeClasses * 2);
-    for (size_t idx = 0; idx < SizeClass::kNumSizeClasses; ++idx) {
+    for (size_t idx : std::views::iota(size_t(0), SizeClass::kNumSizeClasses)) {
         const size_t size = SizeClass::Size(idx);
         // Two cold refills attempt to grow this class twice. The aggregate
         // capacity budget must hold regardless of the order or class size.
-        for (size_t n = 0; n < 2; ++n) {
+        for ([[maybe_unused]] size_t n : std::views::iota(size_t(0), size_t(2))) {
             void* p = cache.Allocate(size);
             ASSERT_NE(p, nullptr);
             held.emplace_back(p, size);
@@ -647,9 +647,9 @@ TEST_F(ThreadCacheTest, AggregateQuotaBudgetBoundsAllSizeClasses) {
     EXPECT_GT(GetThreadCacheStats().budget_denied_growth.load(std::memory_order_relaxed),
               denied_before);
 
-    for (const auto& [ptr, size]: held) {
-        cache.Deallocate(ptr, SizeClass::Index(size));
-    }
+    std::ranges::for_each(held, [&](std::pair<void*, size_t> entry) {
+        cache.Deallocate(entry.first, SizeClass::Index(entry.second));
+    });
     cache.ReleaseAll();
 }
 
@@ -697,9 +697,9 @@ TEST_F(ThreadCacheTest, SoftTrimKeepsOneBatchAndRetractsBurstQuota) {
     ASSERT_LE(cached_before_free, max_size * size);
     const size_t free_to_capacity = max_size - cached_before_free / size;
     ASSERT_LE(free_to_capacity, held.size());
-    for (size_t i = 0; i < free_to_capacity; ++i) {
-        cache.Deallocate(held[i], idx);
-    }
+    std::ranges::for_each(held | std::views::take(free_to_capacity), [&](void* p) {
+        cache.Deallocate(p, idx);
+    });
 
     ASSERT_GT(cache.CachedBytesSnapshot(), batch * size);
     const size_t reservation_before = cache.GetReservedQuotaBytesForTest();
@@ -708,9 +708,9 @@ TEST_F(ThreadCacheTest, SoftTrimKeepsOneBatchAndRetractsBurstQuota) {
     EXPECT_LE(cache.GetReservedQuotaBytesForTest(), reservation_before);
     EXPECT_LE(cache.GetMaxSizeForTest(idx), batch);
 
-    for (size_t i = free_to_capacity; i < held.size(); ++i) {
-        cache.Deallocate(held[i], idx);
-    }
+    std::ranges::for_each(held | std::views::drop(free_to_capacity), [&](void* p) {
+        cache.Deallocate(p, idx);
+    });
     cache.ReleaseAll();
 }
 
@@ -732,9 +732,9 @@ TEST_F(ThreadCacheTest, CooperativeSoftTrimCannotGrowQuotaPastBudget) {
     ASSERT_EQ(cache.GetMaxSizeForTest(idx), kQuota);
     ASSERT_EQ(cache.GetReservedQuotaBytesForTest(), budget);
 
-    for (size_t i = 0; i < kQuota; ++i) {
-        cache.Deallocate(held[i], idx);
-    }
+    std::ranges::for_each(held | std::views::take(kQuota), [&](void* p) {
+        cache.Deallocate(p, idx);
+    });
     ASSERT_EQ(cache.CachedBytesSnapshot(), kQuota * size);
 
     ThreadCache::RequestGlobalTrim(ThreadCacheTrimMode::kReuse);
@@ -761,9 +761,9 @@ TEST_F(ThreadCacheTest, CooperativeHardTrimIsObservedOnlyAtSlowPath) {
     const size_t max_size = cache.GetMaxSizeForTest(idx);
     const size_t fill_count = max_size - cache.CachedBytesSnapshot() / size;
     ASSERT_LT(fill_count, held.size());
-    for (size_t i = 0; i < fill_count; ++i) {
-        cache.Deallocate(held[i], idx);
-    }
+    std::ranges::for_each(held | std::views::take(fill_count), [&](void* p) {
+        cache.Deallocate(p, idx);
+    });
     ASSERT_EQ(cache.CachedBytesSnapshot(), max_size * size);
 
     ThreadCache::RequestGlobalTrim(ThreadCacheTrimMode::kRelease);
@@ -772,9 +772,9 @@ TEST_F(ThreadCacheTest, CooperativeHardTrimIsObservedOnlyAtSlowPath) {
     cache.Deallocate(held[fill_count], idx);
     EXPECT_EQ(cache.CachedBytesSnapshot(), 0u);
 
-    for (size_t i = fill_count + 1; i < held.size(); ++i) {
-        cache.Deallocate(held[i], idx);
-    }
+    std::ranges::for_each(held | std::views::drop(fill_count + 1), [&](void* p) {
+        cache.Deallocate(p, idx);
+    });
     cache.ReleaseAll();
 }
 
