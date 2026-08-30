@@ -265,12 +265,31 @@
 - 严重级：P2
 - 状态：已修复（在 `ReleaseSpan`、`AllocSpanLocked` 的切分路径和系统补货路径统一初始化，见 `page_cache.cpp:227, 256, 332`）
 
-- [ ] #### **实现 ThreadCache 垃圾回收 (GC) [Feature]**
-- 背景：线程如果从忙碌转为闲置，其 ThreadCache 中囤积的内存无法被其他线程复用。
-- 方案：
-  1. 建立全局 ThreadCacheRegistry 链表。
-  2. 配合 Scavenger 线程，定期检查 ThreadCache 的使用活跃度。
-  3. 强制回收闲置 ThreadCache 的 FreeList 到 CentralCache。
+- [x] #### **实现 ThreadCache 保留控制与 cooperative GC [Feature]**
+- 背景：纯 per-class quota 和 overflow-only decay 会使长寿命 idle worker 无期限持有
+  cached objects；这些对象的 Span bitmap bit 仍为 allocated，因而会阻止 PageCache
+  Scavenger 回收物理页。
+- 方案：实现 per-thread aggregate quota-capacity budget、owner-thread `trim`/`purge`、
+  bypass TransferCache 的直接 bitmap 归还、TransferCache 有界 drain 和 cooperative trim
+  epoch。后台/控制线程只发布 epoch，绝不直接修改其他线程的 TLS FreeList。
+- 状态：已实现；完全 idle 线程与稳定工作集的稳态线程（不触发慢路径，故不观察
+  epoch）仍需其 scheduler/event-loop 调用 owner-thread API，见 `thread_cache.h`、
+  `central_cache.h`、`ammalloc.h` 及 `docs/api/public-api.md`。自动触发策略另跟踪，
+  见下条「retention 回收的自动触发策略」。
+
+- [ ] #### **retention 回收的自动触发策略（Scavenger wiring）[Feature]**
+- 背景：ThreadCache/CentralCache 的回收控制（quota-capacity budget、cooperative trim
+  epoch、TransferCache 有界 drain）已具备能力但无任何自动触发：`PageHeapScavenger`
+  只对已归还 PageCache free list 的 Span 做 `MADV_DONTNEED`，不发布 trim 请求也不
+  drain 中端。原「实现 ThreadCache 垃圾回收」TODO 中“配合 Scavenger 线程定期检查”
+  的自动语义在实现时被裁剪，需由本条补齐。另注意：即使接线自动发布，稳态盲区线程
+  （见上条）仍需宿主 safepoint 才能收敛。
+- 方案：Scavenger pass 若连续多轮无可释放空闲页（madvise 候选耗尽）且驻留超阈值，
+  则带滞后（hysteresis）地发布 `RequestGlobalTrim(kRelease)` 并有界调用
+  `DrainTransferCaches()`；低水位需避免与慢启动 refill 形成乒乓。同时以 ADR 固定策略
+  与参数，并将“宿主 scheduler 周期性 owner-thread safepoint”写为推荐接入方式。
+- 严重级：P2
+- 状态：未开始
 
 - [ ] #### **补齐 POSIX API 对齐能力 (`calloc` / `realloc` / `memalign`) [Parity]**
 - 背景：当前 TODO 仍缺少对 `calloc`、`realloc`、`memalign` 的正式追踪，导致 `ammalloc` 与 POSIX/常见分配器接口能力存在缺口，难以作为通用替换器落地。

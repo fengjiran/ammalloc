@@ -3,6 +3,9 @@
 #include "ammalloc/page_cache.h"
 #include "ammalloc/spin_lock.h"
 
+#include <algorithm>
+#include <limits>
+
 namespace ammalloc {
 
 #ifdef AMMALLOC_TEST
@@ -28,7 +31,8 @@ size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num,
     bucket.transfer_cache_lock.lock();
     size_t grab_count = std::min(batch_num, bucket.transfer_cache_count);
     for (size_t i = 0; i < grab_count; ++i) {
-        local_ptrs[i] = bucket.transfer_cache[--bucket.transfer_cache_count];
+        const size_t logical_index = --bucket.transfer_cache_count;
+        local_ptrs[i] = bucket.transfer_cache[TransferIndex(bucket, logical_index)];
     }
     bucket.transfer_cache_lock.unlock();
 
@@ -100,7 +104,8 @@ size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num,
             bucket.transfer_cache_lock.lock();
             while (successfully_pushed < actual_prefetched &&
                    bucket.transfer_cache_count < bucket.transfer_cache_capacity) {
-                bucket.transfer_cache[bucket.transfer_cache_count++] =
+                const size_t slot = TransferIndex(bucket, bucket.transfer_cache_count++);
+                bucket.transfer_cache[slot] =
                         prefetch_ptrs[successfully_pushed++];
             }
             bucket.transfer_cache_lock.unlock();
@@ -129,7 +134,21 @@ size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num,
     return fetched;
 }
 
-void CentralCache::ReleaseListToSpans(void* start, size_t aligned_size) noexcept {
+const CentralCacheStats& CentralCache::GetStats() noexcept {
+    return stats_;
+}
+
+size_t CentralCache::GetTransferCacheCountForTest(size_t idx) noexcept {
+    AM_DCHECK(idx < SizeClass::kNumSizeClasses);
+    auto& bucket = buckets_[idx];
+    bucket.transfer_cache_lock.lock();
+    const size_t count = bucket.transfer_cache_count;
+    bucket.transfer_cache_lock.unlock();
+    return count;
+}
+
+void CentralCache::ReleaseListToSpans(void* start, size_t aligned_size,
+                                      CentralReleaseMode mode) noexcept {
     const auto idx = SizeClass::Index(aligned_size);
     auto& bucket = buckets_[idx];
     void* cur = start;
@@ -142,14 +161,19 @@ void CentralCache::ReleaseListToSpans(void* start, size_t aligned_size) noexcept
             cur = static_cast<FreeBlock*>(cur)->next;
         }
 
-        // Absorb the batch without touching Span metadata when capacity permits.
         size_t pushed = 0;
-        bucket.transfer_cache_lock.lock();
-        while (pushed < local_count &&
-               bucket.transfer_cache_count < bucket.transfer_cache_capacity) {
-            bucket.transfer_cache[bucket.transfer_cache_count++] = local_ptrs[pushed++];
+        if (mode == CentralReleaseMode::kTransferCache) {
+            // Absorb the batch without touching Span metadata when capacity
+            // permits. RSS trims select kSpanBitmap and intentionally bypass
+            // this tier so no empty Span remains pinned by CentralCache.
+            bucket.transfer_cache_lock.lock();
+            while (pushed < local_count &&
+                   bucket.transfer_cache_count < bucket.transfer_cache_capacity) {
+                const size_t slot = TransferIndex(bucket, bucket.transfer_cache_count++);
+                bucket.transfer_cache[slot] = local_ptrs[pushed++];
+            }
+            bucket.transfer_cache_lock.unlock();
         }
-        bucket.transfer_cache_lock.unlock();
 
         if (pushed < local_count) {
             // Spans that reach use_count == 0 are collected into an intrusive
@@ -177,6 +201,10 @@ void CentralCache::ReleaseListToSpans(void* start, size_t aligned_size) noexcept
                     // batching cannot recurse through an STL allocation.
                     span->next = empty_span_head;
                     empty_span_head = span;
+                    if (mode == CentralReleaseMode::kSpanBitmap) {
+                        stats_.spans_unpinned_by_direct_release.fetch_add(
+                                1, std::memory_order_relaxed);
+                    }
                 } else if (span->use_count == span->capacity - 1) {
                     // Make a newly non-full Span the next allocation candidate.
                     bucket.span_list.erase(span);
@@ -194,17 +222,97 @@ void CentralCache::ReleaseListToSpans(void* start, size_t aligned_size) noexcept
     }
 }
 
+size_t CentralCache::DrainTransferCaches(size_t max_bytes) noexcept {
+    if (max_bytes == 0) {
+        return 0;
+    }
+
+    const bool unbounded = max_bytes == std::numeric_limits<size_t>::max();
+    size_t drained_bytes = 0;
+
+    // Large classes release the most retained bytes per bounded pointer batch.
+    for (size_t i = SizeClass::kNumSizeClasses; i > 0; --i) {
+        const size_t idx = i - 1;
+        const size_t aligned_size = SizeClass::Size(idx);
+        auto& bucket = buckets_[idx];
+
+        if (!unbounded && max_bytes < aligned_size) {
+            continue;
+        }
+
+        // Snapshot a bounded amount of this bucket. A concurrent producer may
+        // append after the snapshot, but cannot make a drain with SIZE_MAX run
+        // forever; a later pressure request handles newly retained objects.
+        bucket.transfer_cache_lock.lock();
+        const size_t byte_limited_count = unbounded
+                                                  ? bucket.transfer_cache_count
+                                                  : std::min(bucket.transfer_cache_count, max_bytes / aligned_size);
+        bucket.transfer_cache_lock.unlock();
+
+        size_t remaining_from_snapshot = byte_limited_count;
+        while (remaining_from_snapshot > 0) {
+            const size_t batch_limit = std::min(SizeClass::kMaxBatchSize,
+                                                remaining_from_snapshot);
+
+            void* local_ptrs[SizeClass::kMaxBatchSize];
+            bucket.transfer_cache_lock.lock();
+            const size_t detached = std::min(batch_limit,
+                                             bucket.transfer_cache_count);
+            if (detached == 0) {
+                bucket.transfer_cache_lock.unlock();
+                break;
+            }
+
+            // `transfer_cache_begin` is the cold end; normal FetchRange pops
+            // from the logical end. A circular array avoids O(capacity) shifting
+            // under this SpinLock while preserving the remaining LIFO order.
+            for (size_t j = 0; j < detached; ++j) {
+                local_ptrs[j] = bucket.transfer_cache[TransferIndex(bucket, j)];
+            }
+            bucket.transfer_cache_begin = detached == bucket.transfer_cache_capacity
+                                                  ? 0
+                                                  : TransferIndex(bucket, detached);
+            bucket.transfer_cache_count -= detached;
+            bucket.transfer_cache_lock.unlock();
+
+            void* head = nullptr;
+            for (size_t j = 0; j < detached; ++j) {
+                auto* node = static_cast<FreeBlock*>(local_ptrs[j]);
+                node->next = static_cast<FreeBlock*>(head);
+                head = node;
+            }
+
+            // The transfer lock is intentionally not held across PageMap,
+            // bitmap, or PageCache work. ReleaseListToSpans drops the bucket
+            // mutex before it can enter PageCache as well.
+            ReleaseListToSpans(head, aligned_size, CentralReleaseMode::kSpanBitmap);
+
+            const size_t batch_bytes = detached * aligned_size;
+            drained_bytes += batch_bytes;
+            remaining_from_snapshot -= detached;
+            if (!unbounded) {
+                max_bytes -= batch_bytes;
+            }
+        }
+    }
+
+    stats_.transfer_cache_drained_bytes.fetch_add(drained_bytes,
+                                                  std::memory_order_relaxed);
+    return drained_bytes;
+}
+
 void CentralCache::Reset() noexcept {
     for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
         auto& bucket = buckets_[i];
         void* head = nullptr;
         bucket.transfer_cache_lock.lock();
         for (size_t j = 0; j < bucket.transfer_cache_count; ++j) {
-            void* obj = bucket.transfer_cache[j];
+            void* obj = bucket.transfer_cache[TransferIndex(bucket, j)];
             static_cast<FreeBlock*>(obj)->next = static_cast<FreeBlock*>(head);
             head = obj;
         }
         bucket.transfer_cache_count = 0;
+        bucket.transfer_cache_begin = 0;
         bucket.transfer_cache_lock.unlock();
 
         Span* span_list_head = nullptr;
@@ -250,6 +358,7 @@ void CentralCache::Reset() noexcept {
             bucket.transfer_cache = nullptr;
             bucket.transfer_cache_capacity = 0;
             bucket.transfer_cache_count = 0;
+            bucket.transfer_cache_begin = 0;
         }
     }
 
@@ -283,6 +392,7 @@ bool CentralCache::TryInitTransferCache() noexcept {
         size_t batch_num = SizeClass::CalculateBatchSize(SizeClass::Size(i));
         buckets_[i].transfer_cache_capacity = batch_num * kCapScale;
         buckets_[i].transfer_cache = cur_ptr;
+        buckets_[i].transfer_cache_begin = 0;
         cur_ptr += buckets_[i].transfer_cache_capacity;
     }
     return true;

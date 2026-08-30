@@ -5,6 +5,7 @@
 
 #include <cstring>
 #include <gtest/gtest.h>
+#include <limits>
 #include <random>
 #include <thread>
 #include <vector>
@@ -204,6 +205,134 @@ TEST_F(CentralCacheTest, TransferCacheOomDegradesToSpanList) {
     void* object = list.pop();
     static_cast<FreeBlock*>(object)->next = nullptr;
     central_cache_.ReleaseListToSpans(object, 64);
+}
+
+TEST_F(CentralCacheTest, DirectBitmapReleaseUnpinsSpanWithoutTransferCache) {
+    constexpr size_t kSize = 64;
+    const size_t idx = SizeClass::Index(kSize);
+    FreeList list;
+    ASSERT_EQ(central_cache_.FetchRange(list, 1, kSize), 1u);
+    void* object = list.pop();
+    auto* span = PageMap::GetSpan(object);
+    ASSERT_NE(span, nullptr);
+    ASSERT_GT(central_cache_.GetTransferCacheCountForTest(idx), 0u);
+
+    // FetchRange prefetches one additional object. Drain it first, then return
+    // the caller's object through the direct path so the Span can reach zero.
+    EXPECT_EQ(central_cache_.DrainTransferCaches(kSize), kSize);
+    EXPECT_EQ(central_cache_.GetTransferCacheCountForTest(idx), 0u);
+    static_cast<FreeBlock*>(object)->next = nullptr;
+    central_cache_.ReleaseListToSpans(object, kSize, CentralReleaseMode::kSpanBitmap);
+
+    EXPECT_EQ(span->use_count, 0u);
+    EXPECT_FALSE(span->IsUsed());
+}
+
+TEST_F(CentralCacheTest, TransferCacheDrainHonorsByteBudgetAndPreservesHealth) {
+    constexpr size_t kSize = 64;
+    const size_t idx = SizeClass::Index(kSize);
+    FreeList list;
+    ASSERT_EQ(central_cache_.FetchRange(list, 1, kSize), 1u);
+    void* object = list.pop();
+
+    ASSERT_EQ(central_cache_.GetTransferCacheCountForTest(idx), 1u);
+    EXPECT_EQ(central_cache_.DrainTransferCaches(kSize - 1), 0u);
+    EXPECT_EQ(central_cache_.GetTransferCacheCountForTest(idx), 1u);
+    EXPECT_EQ(central_cache_.DrainTransferCaches(kSize), kSize);
+    EXPECT_EQ(central_cache_.GetTransferCacheCountForTest(idx), 0u);
+
+    static_cast<FreeBlock*>(object)->next = nullptr;
+    central_cache_.ReleaseListToSpans(object, kSize, CentralReleaseMode::kSpanBitmap);
+
+    FreeList verify;
+    EXPECT_GT(central_cache_.FetchRange(verify, 1, kSize), 0u);
+    object = verify.pop();
+    static_cast<FreeBlock*>(object)->next = nullptr;
+    central_cache_.ReleaseListToSpans(object, kSize, CentralReleaseMode::kSpanBitmap);
+    central_cache_.DrainTransferCaches(std::numeric_limits<size_t>::max());
+}
+
+TEST_F(CentralCacheTest, TransferCacheDrainPreservesLifoAcrossColdEndWrap) {
+    constexpr size_t kSize = SizeConfig::MAX_TC_SIZE;
+    const size_t idx = SizeClass::Index(kSize);
+    FreeList first;
+    ASSERT_EQ(central_cache_.FetchRange(first, 8, kSize), 8u);
+
+    void* head = nullptr;
+    while (!first.empty()) {
+        auto* object = static_cast<FreeBlock*>(first.pop());
+        object->next = static_cast<FreeBlock*>(head);
+        head = object;
+    }
+    central_cache_.ReleaseListToSpans(head, kSize);
+    ASSERT_EQ(central_cache_.GetTransferCacheCountForTest(idx), 16u);
+
+    EXPECT_EQ(central_cache_.DrainTransferCaches(8 * kSize), 8 * kSize);
+    EXPECT_EQ(central_cache_.GetTransferCacheCountForTest(idx), 8u);
+
+    FreeList second;
+    ASSERT_EQ(central_cache_.FetchRange(second, 4, kSize), 4u);
+    FreeList third;
+    ASSERT_EQ(central_cache_.FetchRange(third, 8, kSize), 8u);
+    // The second request leaves a cold-end offset; the third request needs a
+    // Span refill and appends prefetched pointers across the circular boundary.
+    ASSERT_GT(central_cache_.GetTransferCacheCountForTest(idx), 0u);
+
+    head = nullptr;
+    while (!second.empty()) {
+        auto* object = static_cast<FreeBlock*>(second.pop());
+        object->next = static_cast<FreeBlock*>(head);
+        head = object;
+    }
+    while (!third.empty()) {
+        auto* object = static_cast<FreeBlock*>(third.pop());
+        object->next = static_cast<FreeBlock*>(head);
+        head = object;
+    }
+    central_cache_.ReleaseListToSpans(head, kSize, CentralReleaseMode::kSpanBitmap);
+    central_cache_.DrainTransferCaches(std::numeric_limits<size_t>::max());
+
+    FreeList verify;
+    EXPECT_GT(central_cache_.FetchRange(verify, 1, kSize), 0u);
+    auto* object = static_cast<FreeBlock*>(verify.pop());
+    object->next = nullptr;
+    central_cache_.ReleaseListToSpans(object, kSize, CentralReleaseMode::kSpanBitmap);
+    central_cache_.DrainTransferCaches(std::numeric_limits<size_t>::max());
+}
+
+TEST_F(CentralCacheTest, ConcurrentTransferDrainDoesNotNestBucketLocks) {
+    constexpr size_t kSize = 64;
+    constexpr size_t kIterations = 200;
+    std::atomic<bool> producer_ready{false};
+
+    std::thread producer([&] {
+        producer_ready.store(true, std::memory_order_release);
+        for (size_t i = 0; i < kIterations; ++i) {
+            FreeList list;
+            const size_t fetched = CentralCache::GetInstance().FetchRange(list, 8, kSize);
+            void* head = nullptr;
+            while (!list.empty()) {
+                auto* object = static_cast<FreeBlock*>(list.pop());
+                object->next = static_cast<FreeBlock*>(head);
+                head = object;
+            }
+            if (fetched > 0) {
+                CentralCache::GetInstance().ReleaseListToSpans(head, kSize);
+            }
+        }
+    });
+
+    std::thread drainer([&] {
+        while (!producer_ready.load(std::memory_order_acquire)) {
+        }
+        for (size_t i = 0; i < kIterations; ++i) {
+            CentralCache::GetInstance().DrainTransferCaches(8 * kSize);
+        }
+    });
+
+    producer.join();
+    drainer.join();
+    central_cache_.DrainTransferCaches(std::numeric_limits<size_t>::max());
 }
 
 // Point 7: reallocate after returning objects.

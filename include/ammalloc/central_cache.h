@@ -13,9 +13,25 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 
 namespace ammalloc {
+
+/// @brief Chooses whether a returned object chain may enter TransferCache.
+///
+/// Direct bitmap release is used by owner-thread RSS trims and by bounded
+/// TransferCache drains; ordinary overflow continues to prefer reuse.
+enum class CentralReleaseMode : uint8_t {
+    kTransferCache,
+    kSpanBitmap,
+};
+
+/// @brief Slow-path-only CentralCache retention telemetry.
+struct CentralCacheStats {
+    std::atomic<size_t> transfer_cache_drained_bytes{0};
+    std::atomic<size_t> spans_unpinned_by_direct_release{0};
+};
 
 #ifdef AMMALLOC_TEST
 // Test-only hook: when set to 0 < cap < batch_num, FetchRange returns at most
@@ -39,6 +55,10 @@ class CentralCache {
         SpinLock transfer_cache_lock;
         /// Number of valid pointers currently stored in `transfer_cache`.
         size_t transfer_cache_count{0};
+        /// Physical slot of the cold end in the circular pointer array.
+        /// Together with count this preserves LIFO reuse without moving a hot
+        /// suffix while a drain holds the SpinLock.
+        size_t transfer_cache_begin{0};
         /// Fixed capacity assigned during CentralCache initialization.
         size_t transfer_cache_capacity{0};
         /// Borrowed slice of the contiguous TransferCache backing allocation.
@@ -91,7 +111,23 @@ public:
     /// @param start Head of a non-empty chain of objects from one size class.
     /// @param aligned_size Size-class-aligned object size shared by every object.
     /// @pre Each object belongs to an ammalloc Span for `aligned_size`.
-    void ReleaseListToSpans(void* start, size_t aligned_size) noexcept;
+    void ReleaseListToSpans(void* start, size_t aligned_size,
+                            CentralReleaseMode mode = CentralReleaseMode::kTransferCache) noexcept;
+
+    /// @brief Returns bounded TransferCache contents directly to Span bitmaps.
+    /// @param max_bytes Maximum logical object bytes to drain; SIZE_MAX removes
+    ///        the full per-bucket snapshot observed by this call.
+    /// @return Logical object bytes detached from TransferCache.
+    ///
+    /// Each transfer lock is held only while moving one fixed stack batch. The
+    /// lock is released before PageMap, Span bitmap, or PageCache operations.
+    size_t DrainTransferCaches(size_t max_bytes) noexcept;
+
+    /// @brief Returns slow-path retention telemetry.
+    AM_NODISCARD static const CentralCacheStats& GetStats() noexcept;
+
+    /// @brief Returns one bucket's TransferCache occupancy for tests.
+    AM_NODISCARD size_t GetTransferCacheCountForTest(size_t idx) noexcept;
 
     /// @brief Releases cached objects and spans, then rebuilds the TransferCache
     ///        backing so the singleton keeps its O(1) fast path afterwards.
@@ -117,6 +153,17 @@ private:
     /// @note Single source of truth for the contiguous backing size.
     static size_t CalculateTotalTransferPtrs() noexcept;
 
+    /// @brief Maps a logical cold-to-hot offset to a circular backing slot.
+    /// @pre `offset < bucket.transfer_cache_capacity`.
+    AM_NODISCARD static size_t TransferIndex(const Bucket& bucket,
+                                             size_t offset) noexcept {
+        AM_DCHECK(offset < bucket.transfer_cache_capacity);
+        const size_t index = bucket.transfer_cache_begin + offset;
+        return index < bucket.transfer_cache_capacity
+                       ? index
+                       : index - bucket.transfer_cache_capacity;
+    }
+
     /// @brief Obtains and initializes a Span for one bucket.
     /// @param bucket Bucket that receives the Span.
     /// @param aligned_size Object size used to initialize Span metadata.
@@ -133,6 +180,7 @@ private:
     constexpr static size_t kCapScale = 8;
     /// One independently synchronized bucket per size class.
     std::array<Bucket, SizeClass::kNumSizeClasses> buckets_{};
+    inline static CentralCacheStats stats_{};
 };
 
 

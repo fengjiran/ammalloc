@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <exception>
+#include <limits>
 
 namespace {
 
@@ -63,6 +64,12 @@ struct ThreadCacheCleaner {
 };
 
 thread_local ThreadCacheCleaner tc_cleaner;
+
+// A cooperative pressure request must not scan or modify another thread's TLS
+// cache. This bounded middle-end drain is safe to perform immediately because
+// CentralCache owns its own synchronization; owner threads observe the epoch at
+// later slow-path safepoints.
+constexpr size_t kCooperativeTransferDrainBytes = ThreadCache::kDefaultTrimTargetBytes;
 
 // Keep scavenger startup off the allocation fast path after the first attempt.
 void EnsureScavengerStarted() noexcept {
@@ -194,6 +201,38 @@ void am_free(void* ptr) {
               "Invalid small-object pointer.");
 
     tc->Deallocate(ptr, idx);
+}
+
+void am_thread_cache_trim() noexcept {
+    if (auto* tc = pTLSThreadCache) {
+        // An explicit safepoint must also honor a previously published hard
+        // request before applying its own softer local target.
+        tc->ObserveGlobalTrimRequest();
+        tc->Trim(ThreadCacheTrimMode::kReuse, ThreadCache::kDefaultTrimTargetBytes);
+    }
+}
+
+void am_thread_cache_purge() noexcept {
+    if (auto* tc = pTLSThreadCache) {
+        tc->Trim(ThreadCacheTrimMode::kRelease, 0);
+    }
+
+    // This explicit calling-thread purge is a controlled reclamation boundary,
+    // so drain all currently reachable middle-end retention as well.
+    CentralCache::GetInstance().DrainTransferCaches(std::numeric_limits<size_t>::max());
+}
+
+void am_request_thread_cache_trim() noexcept {
+    ThreadCache::RequestGlobalTrim(ThreadCacheTrimMode::kReuse);
+}
+
+void am_request_thread_cache_purge() noexcept {
+    ThreadCache::RequestGlobalTrim(ThreadCacheTrimMode::kRelease);
+    // Do only bounded work in a controller/pressure callback. Owners that
+    // never reach a slow path (fully idle threads, and steady-state ones with
+    // a balanced working set) still require their scheduler to call the
+    // owner-thread purge API.
+    CentralCache::GetInstance().DrainTransferCaches(kCooperativeTransferDrainBytes);
 }
 
 }// namespace ammalloc

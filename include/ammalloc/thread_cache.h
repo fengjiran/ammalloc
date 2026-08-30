@@ -13,6 +13,10 @@
 #include "ammalloc/free_list.h"
 #include "ammalloc/size_class.h"
 
+#include <array>
+#include <atomic>
+#include <cstdint>
+
 namespace ammalloc {
 
 /// @brief Pure quota-adjustment rules for ThreadCache size-class caches.
@@ -49,6 +53,36 @@ AM_NODISCARD QuotaState NextAfterOverflow(size_t current, size_t batch,
 
 }// namespace quota_policy
 
+/// @brief Selects whether a ThreadCache trim preserves shared reuse or returns
+///        objects directly to their Span bitmaps.
+///
+/// `kReuse` retains a small warm working set and returns evicted objects through
+/// TransferCache. `kRelease` bypasses TransferCache so an empty Span can return
+/// to PageCache and eventually become reclaimable by the scavenger.
+enum class ThreadCacheTrimMode : uint8_t {
+    kReuse,
+    kRelease,
+};
+
+/// @brief Slow-path-only telemetry for ThreadCache retention control.
+///
+/// These counters deliberately do not track every push/pop: exact cached bytes
+/// are computed only while trimming, so ThreadCache hit paths remain local and
+/// branch-free. `cached_bytes_observed_at_trim` is an accumulated observation,
+/// not a current-process RSS measurement.
+struct ThreadCacheStats {
+    // Aggregate `Σ(max_size * class_size)` across live ThreadCache instances.
+    // It is quota capacity, not exact cached object bytes or RSS.
+    std::atomic<size_t> reserved_quota_bytes{0};
+    std::atomic<size_t> trim_count{0};
+    std::atomic<size_t> cached_bytes_observed_at_trim{0};
+    std::atomic<size_t> trimmed_bytes{0};
+    std::atomic<size_t> budget_denied_growth{0};
+};
+
+/// @brief Returns process-wide slow-path ThreadCache retention telemetry.
+AM_NODISCARD const ThreadCacheStats& GetThreadCacheStats() noexcept;
+
 /// @brief Caches thread-cacheable objects for one owning thread.
 ///
 /// ThreadCache provides the allocator's lowest-latency path: a TLS-owned array
@@ -61,13 +95,31 @@ AM_NODISCARD QuotaState NextAfterOverflow(size_t current, size_t batch,
 /// - Overflow deallocation trims one batch back to CentralCache.
 /// - Repeated overflow events decay `max_size` to avoid sticky high-water marks
 ///   after transient bursts.
+/// - A per-thread aggregate quota budget prevents independent classes from
+///   each growing to their own maximum at once.
 ///
 /// Lifetime model:
 /// - Objects cached here remain owned by the allocator system.
 /// - `ReleaseAll()` drains all thread-local state back to CentralCache.
 class alignas(SystemConfig::CACHE_LINE_SIZE) ThreadCache {
 public:
-    ThreadCache() noexcept = default;
+    /// @brief Default aggregate quota capacity for one ThreadCache.
+    ///
+    /// This caps capacity reservations, not exact cached bytes. It is updated
+    /// only when slow paths change a class quota, so the normal push/pop path
+    /// does not perform aggregate accounting.
+    static constexpr size_t kDefaultCacheBudgetBytes = 2 * 1024 * 1024;
+    /// @brief Target used by owner-thread soft trims and cooperative requests.
+    static constexpr size_t kDefaultTrimTargetBytes = kDefaultCacheBudgetBytes / 2;
+
+    ThreadCache() noexcept;
+    /// @brief Builds a cache with a caller-selected aggregate quota budget.
+    /// @note Mainly useful for controlled tests and embedded callers. Values
+    ///       below the one-object-per-class floor are raised to that floor.
+    explicit ThreadCache(size_t cache_budget_bytes) noexcept;
+    /// @brief Destroys an empty manually managed cache.
+    /// @pre Every FreeList is empty; call `ReleaseAll()` before destruction.
+    ~ThreadCache() noexcept;
     ThreadCache(const ThreadCache&) = delete;
     ThreadCache& operator=(const ThreadCache&) = delete;
 
@@ -95,7 +147,7 @@ public:
         // clang-format on
 
         // Refill from CentralCache only after local capacity is exhausted.
-        return FetchFromCentralCache(list, SizeClass::Size(idx));
+        return FetchFromCentralCache(list, idx, SizeClass::Size(idx));
     }
 
     /// @brief Returns one object to its size-class FreeList.
@@ -121,7 +173,7 @@ public:
         // The class size is needed only on this slow path.
         // clang-format off
         if (list.size() > list.max_size()) AM_UNLIKELY {
-            DeallocateSlowPath(list, SizeClass::Size(idx));
+            DeallocateSlowPath(list, idx, SizeClass::Size(idx));
         }
         // clang-format on
     }
@@ -131,6 +183,26 @@ public:
     /// Used during TLS teardown and tests to avoid keeping thread-local state
     /// alive longer than the owning thread.
     void ReleaseAll() noexcept;
+
+    /// @brief Trims this owner thread's cached objects toward `target_bytes`.
+    ///
+    /// The fixed-size class scan runs from large classes to small classes. In
+    /// `kReuse` mode it retains up to one current batch per class, so the target
+    /// is best-effort; `kRelease` may evict every object and can therefore meet
+    /// a zero-byte target. This function is owner-thread-only and must never be
+    /// called by a background thread for another ThreadCache.
+    void Trim(ThreadCacheTrimMode mode, size_t target_bytes) noexcept;
+
+    /// @brief Publishes a cooperative trim request for all ThreadCache owners.
+    ///
+    /// Owners observe the generation only at allocation/deallocation slow
+    /// paths or an explicit owner-thread safepoint. Publishing never derefers
+    /// another thread's TLS cache.
+    static void RequestGlobalTrim(ThreadCacheTrimMode mode) noexcept;
+
+    /// @brief Applies the newest cooperative request at an owner-thread
+    /// safepoint, if one exists.
+    void ObserveGlobalTrimRequest() noexcept;
 
     /// @brief Returns a FreeList high-water limit for testing.
     /// @param idx Size-class index.
@@ -150,24 +222,75 @@ public:
         return free_lists_[idx].overages();
     }
 
+    /// @brief Returns this cache's aggregate quota-capacity reservation.
+    /// @note It is intentionally not the current cached-object byte count.
+    AM_NODISCARD size_t GetReservedQuotaBytesForTest() const noexcept {
+        return reserved_quota_bytes_;
+    }
+
+    /// @brief Returns the configured aggregate quota capacity.
+    AM_NODISCARD size_t GetCacheBudgetBytesForTest() const noexcept {
+        return cache_budget_bytes_;
+    }
+
+    /// @brief Computes current cached-object bytes with a fixed class scan.
+    /// @note Owner-thread-only diagnostic. Production trim paths call it to
+    ///       measure retention; it is not a hot-path metric.
+    AM_NODISCARD size_t CachedBytesSnapshot() const noexcept;
+
 private:
     // One TLS-owned LIFO cache per size class. No synchronization is required
     // because the owning thread is the only mutator.
     std::array<FreeList, SizeClass::kNumSizeClasses> free_lists_{};
+
+    /// Sum of `max_size * class_size` across all classes. This is capacity
+    /// accounting only and changes exclusively on refill/overflow/trim paths.
+    size_t reserved_quota_bytes_{0};
+    /// Aggregate quota-capacity ceiling for this owner thread.
+    size_t cache_budget_bytes_{kDefaultCacheBudgetBytes};
+    /// Last cooperative trim generation observed by this owner thread.
+    uint64_t observed_trim_epoch_{0};
 
     /// @brief Refills an empty FreeList from CentralCache and updates its quota.
     ///
     /// The quota follows a two-stage policy:
     /// - exponential warmup until one batch,
     /// - linear growth up to a bounded multiple of the batch size.
-    AM_NOINLINE static void* FetchFromCentralCache(FreeList& list, size_t aligned_size) noexcept;
+    AM_NOINLINE void* FetchFromCentralCache(FreeList& list, size_t idx,
+                                            size_t aligned_size) noexcept;
 
     /// @brief Trims one batch to CentralCache and applies quota decay.
     ///
     /// Repeated overflow trims without intervening refill demand reduce
     /// `max_size`, preventing long-lived threads from pinning burst-era quotas.
-    AM_NOINLINE static void DeallocateSlowPath(FreeList& list, size_t aligned_size) noexcept;
+    AM_NOINLINE void DeallocateSlowPath(FreeList& list, size_t idx,
+                                        size_t aligned_size) noexcept;
+
+    /// @brief Updates one class quota and its aggregate byte reservation.
+    void SetQuota(size_t idx, size_t max_size) noexcept;
+
+    /// @brief Returns the fixed one-object-per-class quota reservation.
+    AM_NODISCARD static constexpr size_t InitialReservedQuotaBytes() noexcept {
+        size_t total = 0;
+        for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
+            total += SizeClass::Size(i);
+        }
+        return total;
+    }
+
+    /// @brief Returns true if increasing a class quota fits the byte budget.
+    AM_NODISCARD bool CanGrowQuota(size_t idx, size_t next_max_size) const noexcept;
+
+    // Packed as `(epoch << 1) | mode`. One atomic publication keeps concurrent
+    // pressure requesters from pairing one request's epoch with another
+    // request's mode; this state is never read on a normal ThreadCache hit.
+    inline static std::atomic<uint64_t> trim_request_{0};
 };
+
+// CreateThreadCache reserves exactly one SystemAlloc page for this object.
+// Lock the layout assumption so future members cannot silently outgrow it.
+static_assert(sizeof(ThreadCache) <= SystemConfig::PAGE_SIZE,
+              "ThreadCache must fit in one SystemAlloc page");
 }// namespace ammalloc
 
 #endif// AMMALLOC_THREAD_CACHE_H

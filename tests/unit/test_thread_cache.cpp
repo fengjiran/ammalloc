@@ -1,10 +1,13 @@
+#include "ammalloc/ammalloc.h"
 #include "ammalloc/central_cache.h"
 #include "ammalloc/page_allocator.h"
 #include "ammalloc/page_cache.h"
 #include "ammalloc/thread_cache.h"
 
-#include <gtest/gtest.h>
+#include <cstdlib>
 #include <random>
+
+#include <gtest/gtest.h>
 
 namespace {
 using namespace ammalloc;
@@ -24,6 +27,21 @@ protected:
         page_cache_.Reset();
     }
 };
+
+TEST(ThreadCacheDeathTest, DestructionRequiresEmptyFreeLists) {
+#ifndef NDEBUG
+    EXPECT_DEATH(
+            {
+                ThreadCache cache;
+                void* ptr = cache.Allocate(64);
+                if (!ptr) {
+                    std::_Exit(0);
+                }
+                cache.Deallocate(ptr, SizeClass::Index(64));
+            },
+            "Check failed");
+#endif
+}
 
 // Test 1: basic Allocate.
 TEST_F(ThreadCacheTest, BasicAllocate) {
@@ -552,7 +570,7 @@ TEST_F(ThreadCacheTest, MaxSizeStaysBoundedUnderSustainedLoad) {
         EXPECT_LE(ms, batch * quota_policy::kMaxQuotaBatches);
     }
 
-    for (void* p : held) tc.Deallocate(p, idx);
+    for (void* p: held) tc.Deallocate(p, idx);
     tc.ReleaseAll();
 }
 
@@ -575,11 +593,186 @@ TEST_F(ThreadCacheTest, PartialRefillHoldsQuotaAndOverage) {
     g_mock_fetch_range_cap.store(0, std::memory_order_relaxed);
 
     ASSERT_NE(p2, nullptr);
-    EXPECT_EQ(tc.GetMaxSizeForTest(idx), 2u);   // quota unchanged
-    EXPECT_EQ(tc.GetOveragesForTest(idx), 0u);  // decay signal preserved
+    EXPECT_EQ(tc.GetMaxSizeForTest(idx), 2u); // quota unchanged
+    EXPECT_EQ(tc.GetOveragesForTest(idx), 0u);// decay signal preserved
 
     tc.Deallocate(p1, idx);
     tc.Deallocate(p2, idx);
     tc.ReleaseAll();
+}
+
+TEST_F(ThreadCacheTest, AggregateQuotaBudgetBoundsAllSizeClasses) {
+    ThreadCache baseline;
+    const size_t base_reservation = baseline.GetReservedQuotaBytesForTest();
+    const size_t budget = base_reservation + SystemConfig::PAGE_SIZE;
+    ThreadCache cache(budget);
+    const auto denied_before = GetThreadCacheStats().budget_denied_growth.load(
+            std::memory_order_relaxed);
+
+    std::vector<std::pair<void*, size_t>> held;
+    held.reserve(SizeClass::kNumSizeClasses * 2);
+    for (size_t idx = 0; idx < SizeClass::kNumSizeClasses; ++idx) {
+        const size_t size = SizeClass::Size(idx);
+        // Two cold refills attempt to grow this class twice. The aggregate
+        // capacity budget must hold regardless of the order or class size.
+        for (size_t n = 0; n < 2; ++n) {
+            void* p = cache.Allocate(size);
+            ASSERT_NE(p, nullptr);
+            held.emplace_back(p, size);
+            EXPECT_LE(cache.GetReservedQuotaBytesForTest(), budget);
+        }
+    }
+
+    EXPECT_GT(GetThreadCacheStats().budget_denied_growth.load(std::memory_order_relaxed),
+              denied_before);
+
+    for (const auto& [ptr, size]: held) {
+        cache.Deallocate(ptr, SizeClass::Index(size));
+    }
+    cache.ReleaseAll();
+}
+
+TEST_F(ThreadCacheTest, QuotaReservationTracksGrowthAndHardTrim) {
+    ThreadCache baseline;
+    const size_t base_reservation = baseline.GetReservedQuotaBytesForTest();
+    const size_t size = SizeClass::RoundUp(16);
+    const size_t idx = SizeClass::Index(size);
+    ThreadCache cache(base_reservation + size);
+
+    void* small = cache.Allocate(size);
+    ASSERT_NE(small, nullptr);
+    EXPECT_EQ(cache.GetMaxSizeForTest(idx), 2u);
+    EXPECT_EQ(cache.GetReservedQuotaBytesForTest(), base_reservation + size);
+
+    const size_t large_size = SizeConfig::MAX_TC_SIZE;
+    const size_t large_idx = SizeClass::Index(large_size);
+    void* large = cache.Allocate(large_size);
+    ASSERT_NE(large, nullptr);
+    EXPECT_EQ(cache.GetMaxSizeForTest(large_idx), 1u);
+    EXPECT_EQ(cache.GetReservedQuotaBytesForTest(), base_reservation + size);
+
+    cache.Deallocate(small, idx);
+    cache.Deallocate(large, large_idx);
+    cache.Trim(ThreadCacheTrimMode::kRelease, 0);
+    EXPECT_EQ(cache.CachedBytesSnapshot(), 0u);
+    EXPECT_EQ(cache.GetReservedQuotaBytesForTest(), base_reservation);
+}
+
+TEST_F(ThreadCacheTest, SoftTrimKeepsOneBatchAndRetractsBurstQuota) {
+    ThreadCache cache;
+    const size_t size = SizeConfig::MAX_TC_SIZE;
+    const size_t idx = SizeClass::Index(size);
+    const size_t batch = SizeClass::CalculateBatchSize(size);
+
+    std::vector<void*> held;
+    while (cache.GetMaxSizeForTest(idx) < batch + 2) {
+        void* p = cache.Allocate(size);
+        ASSERT_NE(p, nullptr);
+        held.push_back(p);
+    }
+
+    const size_t cached_before_free = cache.CachedBytesSnapshot();
+    const size_t max_size = cache.GetMaxSizeForTest(idx);
+    ASSERT_LE(cached_before_free, max_size * size);
+    const size_t free_to_capacity = max_size - cached_before_free / size;
+    ASSERT_LE(free_to_capacity, held.size());
+    for (size_t i = 0; i < free_to_capacity; ++i) {
+        cache.Deallocate(held[i], idx);
+    }
+
+    ASSERT_GT(cache.CachedBytesSnapshot(), batch * size);
+    const size_t reservation_before = cache.GetReservedQuotaBytesForTest();
+    cache.Trim(ThreadCacheTrimMode::kReuse, batch * size);
+    EXPECT_LE(cache.CachedBytesSnapshot(), batch * size);
+    EXPECT_LE(cache.GetReservedQuotaBytesForTest(), reservation_before);
+    EXPECT_LE(cache.GetMaxSizeForTest(idx), batch);
+
+    for (size_t i = free_to_capacity; i < held.size(); ++i) {
+        cache.Deallocate(held[i], idx);
+    }
+    cache.ReleaseAll();
+}
+
+TEST_F(ThreadCacheTest, CooperativeSoftTrimCannotGrowQuotaPastBudget) {
+    ThreadCache baseline;
+    const size_t base_reservation = baseline.GetReservedQuotaBytesForTest();
+    const size_t size = SizeConfig::MAX_TC_SIZE;
+    const size_t idx = SizeClass::Index(size);
+    constexpr size_t kQuota = 4;
+    const size_t budget = base_reservation + (kQuota - 1) * size;
+    ThreadCache cache(budget);
+
+    std::vector<void*> held;
+    while (cache.GetMaxSizeForTest(idx) < kQuota || held.size() < kQuota + 1) {
+        void* p = cache.Allocate(size);
+        ASSERT_NE(p, nullptr);
+        held.push_back(p);
+    }
+    ASSERT_EQ(cache.GetMaxSizeForTest(idx), kQuota);
+    ASSERT_EQ(cache.GetReservedQuotaBytesForTest(), budget);
+
+    for (size_t i = 0; i < kQuota; ++i) {
+        cache.Deallocate(held[i], idx);
+    }
+    ASSERT_EQ(cache.CachedBytesSnapshot(), kQuota * size);
+
+    ThreadCache::RequestGlobalTrim(ThreadCacheTrimMode::kReuse);
+    cache.Deallocate(held[kQuota], idx);
+
+    EXPECT_LE(cache.GetMaxSizeForTest(idx), kQuota);
+    EXPECT_LE(cache.GetReservedQuotaBytesForTest(), budget);
+    cache.ReleaseAll();
+}
+
+TEST_F(ThreadCacheTest, CooperativeHardTrimIsObservedOnlyAtSlowPath) {
+    ThreadCache cache;
+    const size_t size = SizeConfig::MAX_TC_SIZE;
+    const size_t idx = SizeClass::Index(size);
+    const size_t batch = SizeClass::CalculateBatchSize(size);
+
+    std::vector<void*> held;
+    while (cache.GetMaxSizeForTest(idx) < batch + 2) {
+        void* p = cache.Allocate(size);
+        ASSERT_NE(p, nullptr);
+        held.push_back(p);
+    }
+
+    const size_t max_size = cache.GetMaxSizeForTest(idx);
+    const size_t fill_count = max_size - cache.CachedBytesSnapshot() / size;
+    ASSERT_LT(fill_count, held.size());
+    for (size_t i = 0; i < fill_count; ++i) {
+        cache.Deallocate(held[i], idx);
+    }
+    ASSERT_EQ(cache.CachedBytesSnapshot(), max_size * size);
+
+    ThreadCache::RequestGlobalTrim(ThreadCacheTrimMode::kRelease);
+    // A normal hit does not observe a shared epoch. Pushing one more object
+    // crosses the quota, enters the existing slow path, and performs the trim.
+    cache.Deallocate(held[fill_count], idx);
+    EXPECT_EQ(cache.CachedBytesSnapshot(), 0u);
+
+    for (size_t i = fill_count + 1; i < held.size(); ++i) {
+        cache.Deallocate(held[i], idx);
+    }
+    cache.ReleaseAll();
+}
+
+TEST_F(ThreadCacheTest, ExplicitOwnerPurgeDrainsCurrentThreadAndTransferCache) {
+    constexpr size_t size = 64;
+    std::thread worker([] {
+        void* p = am_malloc(size);
+        ASSERT_NE(p, nullptr);
+        am_free(p);
+        am_thread_cache_purge();
+
+        void* reused = am_malloc(size);
+        ASSERT_NE(reused, nullptr);
+        am_free(reused);
+        am_thread_cache_purge();
+    });
+    worker.join();
+
+    const size_t idx = SizeClass::Index(size);
+    EXPECT_EQ(central_cache_.GetTransferCacheCountForTest(idx), 0u);
 }
 }// namespace
