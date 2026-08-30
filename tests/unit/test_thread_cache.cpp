@@ -43,6 +43,27 @@ TEST(ThreadCacheDeathTest, DestructionRequiresEmptyFreeLists) {
 #endif
 }
 
+// Counterpart of the negative guard above: draining via ReleaseAll() must
+// satisfy the destructor precondition in every build (the debug DCHECK is
+// compiled out under NDEBUG, so this case is meaningful in both modes).
+TEST(ThreadCacheDeathTest, DestructionAfterReleaseAllExitsCleanly) {
+    EXPECT_EXIT(
+            {
+                {
+                    ThreadCache cache;
+                    void* ptr = cache.Allocate(64);
+                    if (!ptr) {
+                        std::_Exit(0);
+                    }
+                    cache.Deallocate(ptr, SizeClass::Index(64));
+                    cache.ReleaseAll();
+                }// Destructor runs here and must not trip the guard.
+                std::_Exit(0);
+            },
+            ::testing::ExitedWithCode(0),
+            "");
+}
+
 // Test 1: basic Allocate.
 TEST_F(ThreadCacheTest, BasicAllocate) {
     thread_local ThreadCache cache;
