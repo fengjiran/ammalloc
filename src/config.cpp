@@ -1,3 +1,6 @@
+/// @file config.cpp
+/// @brief Runtime configuration initialization from environment variables.
+
 #include "ammalloc/config.h"
 #include "ammalloc/common.h"
 

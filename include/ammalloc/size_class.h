@@ -1,7 +1,7 @@
 #ifndef AMMALLOC_SIZE_CLASS_H
 #define AMMALLOC_SIZE_CLASS_H
 
-/// @file
+/// @file size_class.h
 /// @brief Constant-time mapping between allocation sizes and fixed-size buckets.
 ///
 /// Small sizes use compile-time lookup tables; larger ThreadCache sizes use a
@@ -267,9 +267,13 @@ public:
         return MovePagesByIndex(Index(aligned_size));
     }
 
-    /// Number of size classes used to size ThreadCache and CentralCache arrays.
+    /// Used to size ThreadCache and CentralCache fixed-length arrays.
     static constexpr size_t kNumSizeClasses = detail::CalculateIndex(SizeConfig::MAX_TC_SIZE) + 1;
 
+    /// @brief Upper bound on per-class batch transfer count.
+    ///
+    /// Caps objects moved in a single ThreadCache/CentralCache transfer
+    /// to prevent unbounded memory consumption in small-object classes.
     static constexpr size_t kMaxBatchSize = 512;
 
 private:

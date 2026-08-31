@@ -1,7 +1,7 @@
 #ifndef AMMALLOC_ASSERT_H
 #define AMMALLOC_ASSERT_H
 
-/// @file
+/// @file assert.h
 /// @brief Self-contained assertion macros and abort helpers for ammalloc.
 ///
 /// This header mirrors the relevant contract from `include/utils/logging.h`
@@ -34,7 +34,7 @@ inline void HandleCheckFailed(std::string_view condition, std::source_location l
 /// @param loc Source location of the check expression.
 /// @param fmt Format string passed to `std::format`.
 /// @param args Arguments consumed by `fmt`.
-/// @throws std::format_error if formatting fails before the process aborts.
+/// @throws std::format_error if formatting fails (the process will not abort in this case).
 template<typename... Args>
 void HandleCheckFailed(std::string_view condition,
                        std::source_location loc,
@@ -47,7 +47,7 @@ void HandleCheckFailed(std::string_view condition,
     std::abort();
 }
 
-}// namespace ammalloc::detail
+} // namespace ammalloc::detail
 
 /// @brief Evaluates an invariant and aborts when it is false.
 /// @param condition Expression evaluated exactly once.
@@ -88,10 +88,12 @@ void HandleCheckFailed(std::string_view condition,
 /// debug build and in release builds only when `AM_HARDENED` is defined; a
 /// failure aborts with the same `Check failed` contract as `AM_CHECK` and
 /// produces no code when disabled.
+/// @param condition Expression evaluated when hardened checks are enabled.
+/// @param ... Optional `std::format` string and arguments for the failure message.
 #if defined(AM_HARDENED) || !defined(NDEBUG)
 #define AM_HCHECK(condition, ...) AM_CHECK(condition __VA_OPT__(,) __VA_ARGS__)
 #else
 #define AM_HCHECK(condition, ...) ((void)0)
 #endif
 
-#endif// AMMALLOC_ASSERT_H
+#endif // AMMALLOC_ASSERT_H

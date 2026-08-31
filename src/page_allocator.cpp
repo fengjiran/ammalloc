@@ -1,6 +1,8 @@
-// PageAllocator uses optimistic huge-page alignment: try an exact mapping first,
-// then over-allocate and trim only after a misaligned result. Released 2 MiB
-// mappings may remain in the internal lock-free cache for reuse.
+/// @file page_allocator.cpp
+/// @brief System page allocation with optimistic huge-page alignment and a lock-free 2 MiB cache.
+///
+/// Tries an exact mapping first, then over-allocates and trims on misalignment.
+/// Released 2 MiB mappings may remain in the internal lock-free cache for reuse.
 
 #include "ammalloc/page_allocator.h"
 #include "ammalloc/assert.h"
@@ -128,6 +130,9 @@ private:
             if (head.compare_exchange_weak(old_val, new_val,
                                            std::memory_order_acquire,
                                            std::memory_order_acquire)) {
+                // Acquire on CAS failure ensures we re-read the updated slot
+                // `.next` value published by the concurrent Push's release
+                // store on retry.
                 out = index;
                 return true;
             }
@@ -143,6 +148,9 @@ private:
             if (head.compare_exchange_weak(old_val, new_val,
                                            std::memory_order_release,
                                            std::memory_order_relaxed)) {
+                // Release on CAS success publishes the slot's `.next` pointer
+                // written above so that a subsequent Pop's acquire load
+                // observes a consistent stack link.
                 return;
             }
         }

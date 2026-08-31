@@ -1,7 +1,7 @@
 #ifndef AMMALLOC_CENTRAL_CACHE_H
 #define AMMALLOC_CENTRAL_CACHE_H
 
-/// @file
+/// @file central_cache.h
 /// @brief Shared object cache between per-thread caches and PageCache.
 /// @see docs/designs/03-central-cache.md
 
@@ -23,13 +23,15 @@ namespace ammalloc {
 /// Direct bitmap release is used by owner-thread RSS trims and by bounded
 /// TransferCache drains; ordinary overflow continues to prefer reuse.
 enum class CentralReleaseMode : uint8_t {
-    kTransferCache,
-    kSpanBitmap,
+    kTransferCache, ///< Return objects through the shared TransferCache bucket.
+    kSpanBitmap,    ///< Bypass TransferCache; release directly to Span bitmaps.
 };
 
 /// @brief Slow-path-only CentralCache retention telemetry.
 struct CentralCacheStats {
+    /// Cumulative bytes removed from TransferCache via DrainTransferCaches.
     std::atomic<size_t> transfer_cache_drained_bytes{0};
+    /// Count of spans that became fully empty after direct bitmap release.
     std::atomic<size_t> spans_unpinned_by_direct_release{0};
 };
 
@@ -110,6 +112,8 @@ public:
     /// @brief Returns an intrusive object chain to the matching shared bucket.
     /// @param start Head of a non-empty chain of objects from one size class.
     /// @param aligned_size Size-class-aligned object size shared by every object.
+    /// @param mode Selects whether objects enter TransferCache or are released
+    ///        directly to Span bitmaps.
     /// @pre Each object belongs to an ammalloc Span for `aligned_size`.
     void ReleaseListToSpans(void* start, size_t aligned_size,
                             CentralReleaseMode mode = CentralReleaseMode::kTransferCache) noexcept;
@@ -124,9 +128,12 @@ public:
     size_t DrainTransferCaches(size_t max_bytes) noexcept;
 
     /// @brief Returns slow-path retention telemetry.
+    /// @return Reference to the process-wide stats object.
     AM_NODISCARD static const CentralCacheStats& GetStats() noexcept;
 
     /// @brief Returns one bucket's TransferCache occupancy for tests.
+    /// @param idx Size-class index of the bucket to query.
+    /// @return Number of valid pointers currently held in the bucket's TransferCache.
     AM_NODISCARD size_t GetTransferCacheCountForTest(size_t idx) noexcept;
 
     /// @brief Releases cached objects and spans, then rebuilds the TransferCache
@@ -186,4 +193,4 @@ private:
 
 }// namespace ammalloc
 
-#endif// AMMALLOC_CENTRAL_CACHE_H
+#endif // AMMALLOC_CENTRAL_CACHE_H

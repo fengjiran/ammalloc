@@ -1,7 +1,7 @@
 #ifndef AMMALLOC_SPIN_LOCK_H
 #define AMMALLOC_SPIN_LOCK_H
 
-/// @file
+/// @file spin_lock.h
 /// @brief Test-and-test-and-set spin lock for short allocator critical sections.
 
 #include "ammalloc/attributes.h"
@@ -20,8 +20,11 @@ namespace ammalloc {
 /// fair nor recursive and must not protect operations that sleep or block.
 class SpinLock {
 public:
+    /// @brief Default-constructs an unlocked SpinLock.
     SpinLock() noexcept = default;
+    /// @brief Non-copyable.
     SpinLock(const SpinLock&) = delete;
+    /// @brief Non-copyable.
     SpinLock& operator=(const SpinLock&) = delete;
 
     /// @brief Blocks until the caller acquires the lock.

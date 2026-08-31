@@ -1,7 +1,7 @@
 #ifndef AMMALLOC_THREAD_CACHE_H
 #define AMMALLOC_THREAD_CACHE_H
 
-/// @file
+/// @file thread_cache.h
 /// @brief Thread-confined front-end cache for small-object allocation.
 ///
 /// The hot path is lock-free because each ThreadCache and its FreeLists are
@@ -112,6 +112,7 @@ public:
     /// @brief Target used by owner-thread soft trims and cooperative requests.
     static constexpr size_t kDefaultTrimTargetBytes = kDefaultCacheBudgetBytes / 2;
 
+    /// @brief Constructs with the default aggregate quota budget.
     ThreadCache() noexcept;
     /// @brief Builds a cache with a caller-selected aggregate quota budget.
     /// @note Mainly useful for controlled tests and embedded callers. Values

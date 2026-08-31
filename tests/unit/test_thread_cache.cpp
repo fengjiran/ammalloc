@@ -4,6 +4,7 @@
 #include "ammalloc/page_cache.h"
 #include "ammalloc/thread_cache.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <gtest/gtest.h>
 #include <random>

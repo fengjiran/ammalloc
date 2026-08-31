@@ -1,7 +1,7 @@
 #ifndef AMMALLOC_PAGE_HEAP_SCAVENGER_H
 #define AMMALLOC_PAGE_HEAP_SCAVENGER_H
 
-/// @file
+/// @file page_heap_scavenger.h
 /// @brief Background reclamation of physical pages from idle PageCache spans.
 /// @see docs/designs/06-page-heap-scavenger.md, docs/decisions/0001-scavenger-startup-strategy.md
 

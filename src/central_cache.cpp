@@ -1,3 +1,6 @@
+/// @file central_cache.cpp
+/// @brief Middle-end object cache with per-size-class TransferCache and SpanList management.
+
 #include "ammalloc/central_cache.h"
 #include "ammalloc/assert.h"
 #include "ammalloc/page_cache.h"
@@ -53,7 +56,7 @@ size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num,
         size_t need_for_thread = batch_num - fetched;
         // Prefetch one additional batch to amortize the SpanList lock for the
         // next requester.
-        // TODO(ammalloc): Bound prefetching by the observed TransferCache capacity.
+        // TODO(owner): Bound prefetching by the observed TransferCache capacity.
         const size_t extract_target = need_for_thread + batch_num;
         void* prefetch_ptrs[SizeClass::kMaxBatchSize];
         size_t actual_prefetched = 0;

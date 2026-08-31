@@ -1,7 +1,7 @@
 #ifndef AMMALLOC_PAGE_ALLOCATOR_H
 #define AMMALLOC_PAGE_ALLOCATOR_H
 
-/// @file
+/// @file page_allocator.h
 /// @brief Page-level OS allocation and fixed-size metadata pooling.
 ///
 /// `PageAllocator` wraps `mmap`, `munmap`, and `madvise`, including an internal
@@ -33,12 +33,10 @@ extern std::atomic<bool> g_mock_normal_alloc_fail;
 /// @brief Best-effort allocator telemetry stored in relaxed atomics.
 /// @note Counters provide observation rather than a mutually consistent snapshot.
 struct PageAllocatorStats {
-    // Normal-page allocation counters.
     std::atomic<size_t> normal_alloc_count{0};
     std::atomic<size_t> normal_alloc_success{0};
     std::atomic<size_t> normal_alloc_bytes{0};
 
-    // Huge-page allocation and cache counters.
     std::atomic<size_t> huge_alloc_count{0};
     std::atomic<size_t> huge_alloc_success{0};
     std::atomic<size_t> huge_alloc_bytes{0};
@@ -129,6 +127,7 @@ template<typename T, size_t CHUNK_SIZE = 64 * 1024>
     requires(sizeof(T) >= sizeof(void*))
 class ObjectPool {
 public:
+    /// @brief Constructs an empty object pool with no backing storage allocated.
     ObjectPool() = default;
 
     // The pool owns raw chunk and free-list pointers; a copy would create two
@@ -213,6 +212,7 @@ public:
         remain_bytes_ = 0;
     }
 
+    /// @brief Destroys the pool and releases all backing page mappings.
     ~ObjectPool() {
         auto* cur = chunk_list_;
         while (cur) {
@@ -232,9 +232,13 @@ private:
         size_t page_num;
     };
 
+    // Points to the next available aligned slot in the current chunk.
     char* data_{nullptr};
+    // Remaining usable bytes in the current chunk from `data_` onward.
     size_t remain_bytes_{0};
+    // Intrusive singly-linked list of freed slots available for reuse.
     FreeHeader* free_list_{nullptr};
+    // Head of singly-linked list of all owned chunks; freed on destruction.
     ChunkHeader* chunk_list_{nullptr};
 };
 

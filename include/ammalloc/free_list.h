@@ -1,7 +1,7 @@
 #ifndef AMMALLOC_FREE_LIST_H
 #define AMMALLOC_FREE_LIST_H
 
-/// @file
+/// @file free_list.h
 /// @brief Allocation-free intrusive LIFO object chain with per-class quota state.
 /// @see docs/designs/08-free-list.md
 
@@ -17,6 +17,7 @@ namespace ammalloc {
 
 /// @brief Intrusive link stored in the body of a free object.
 struct FreeBlock {
+    /// Next free block in the LIFO chain; indeterminate when not in a FreeList.
     FreeBlock* next;
 };
 
@@ -26,10 +27,13 @@ static_assert(sizeof(FreeBlock) <= SystemConfig::ALIGNMENT,
               "intrusive next pointer does not fit in the smallest object");
 
 /// @brief A detached chain of free objects removed from a FreeList.
+///
+/// `head` and `tail` point to `FreeBlock` nodes. In a well-formed chain,
+/// `tail->next == nullptr` and the chain contains exactly `count` nodes.
 struct FreeChain {
-    void* head = nullptr;
-    void* tail = nullptr;
-    size_t count = 0;
+    void* head = nullptr;   ///< First node in the chain (FreeBlock*).
+    void* tail = nullptr;   ///< Last node in the chain (FreeBlock*); tail->next == nullptr.
+    size_t count = 0;       ///< Number of nodes in the chain.
 };
 
 /// @brief Stores free objects in an allocation-free intrusive LIFO chain.
@@ -231,10 +235,8 @@ private:
         return head ? n + 1 : std::numeric_limits<size_t>::max();
     }
 
-    // Head of the intrusive LIFO chain.
     FreeBlock* head_;
 
-    // Number of cached objects currently held in this list.
     size_t size_;
 
     // ThreadCache high-water mark for this size class.

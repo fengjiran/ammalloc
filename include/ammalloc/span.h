@@ -1,7 +1,7 @@
 #ifndef AMMALLOC_SPAN_H
 #define AMMALLOC_SPAN_H
 
-/// @file
+/// @file span.h
 /// @brief Span metadata, bitmap allocation, and intrusive Span lists.
 /// @see docs/designs/07-span-and-pagemap.md
 
@@ -35,17 +35,17 @@ struct alignas(SystemConfig::CACHE_LINE_SIZE) Span {
 
     // Packed status flags. Use IsUsed/SetUsed/IsCommitted/SetCommitted.
     uint16_t flags{0};
-    uint16_t size_class_idx{0};// Index into the CentralCache bucket array.
+    uint16_t size_class_idx{0}; // Index into the CentralCache bucket array.
 
     // Object allocation metadata (valid when used by CentralCache).
     uint32_t aligned_obj_size{0};
     uint32_t capacity{0};   // Maximum objects stored in this Span.
     uint32_t use_count{0};  // Small objects absent from the bitmap, pinning this descriptor.
-    uint32_t scan_cursor{0};// First bitmap word that may contain a free bit.
+    uint32_t scan_cursor{0}; // First bitmap word that may contain a free bit.
 
     // Calculated data offset (avoids storing full pointer).
     uint32_t obj_offset{0};    // Offset from the page base to the first object.
-    uint32_t owner_shard_id{0};// PageCache shard that owns this metadata.
+    uint32_t owner_shard_id{0}; // PageCache shard that owns this metadata.
 
     // Cold data: used by background scavenger thread.
     uint64_t last_used_time_ms{0};
@@ -162,7 +162,9 @@ public:
         using pointer = Span*;
         using reference = Span&;
 
+        /// @brief Constructs a past-the-end iterator.
         Iterator() = default;
+        /// @brief Constructs an iterator pointing to `node`.
         explicit Iterator(Span* node) noexcept : node_(node) {}
 
         reference operator*() const noexcept {
@@ -206,7 +208,9 @@ public:
         using pointer = const Span*;
         using reference = const Span&;
 
+        /// @brief Constructs a past-the-end const iterator.
         ConstIterator() = default;
+        /// @brief Constructs a const iterator pointing to `node`.
         explicit ConstIterator(const Span* node) noexcept : node_(node) {}
 
         reference operator*() const noexcept {

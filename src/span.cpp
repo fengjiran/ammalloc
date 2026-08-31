@@ -1,3 +1,6 @@
+/// @file span.cpp
+/// @brief Bitmap-managed small-object allocation within a contiguous page span.
+
 #include "ammalloc/span.h"
 #include "ammalloc/size_class.h"
 

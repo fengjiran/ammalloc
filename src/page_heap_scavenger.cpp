@@ -1,3 +1,6 @@
+/// @file page_heap_scavenger.cpp
+/// @brief Background thread that reclaims physical memory from idle free spans via MADV_DONTNEED.
+
 #include "ammalloc/page_heap_scavenger.h"
 #include "ammalloc/page_cache.h"
 

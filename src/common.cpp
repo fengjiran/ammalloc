@@ -1,3 +1,6 @@
+/// @file common.cpp
+/// @brief Environment-variable string parsing utilities for runtime configuration.
+
 #include "ammalloc/common.h"
 
 #include <cctype>

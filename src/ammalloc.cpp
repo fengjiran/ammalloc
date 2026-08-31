@@ -1,3 +1,6 @@
+/// @file ammalloc.cpp
+/// @brief Public allocation API and TLS thread-cache management.
+
 #include "ammalloc/ammalloc.h"
 #include "ammalloc/central_cache.h"
 #include "ammalloc/config.h"

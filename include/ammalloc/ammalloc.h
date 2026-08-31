@@ -1,7 +1,7 @@
 #ifndef AMMALLOC_AMMALLOC_H
 #define AMMALLOC_AMMALLOC_H
 
-/// @file
+/// @file ammalloc.h
 /// @brief Public allocation and deallocation entry points for ammalloc.
 /// @see docs/designs/ammalloc_design.md, docs/api/public-api.md
 
@@ -48,8 +48,11 @@ void am_thread_cache_purge() noexcept;
 void am_request_thread_cache_trim() noexcept;
 
 /// @brief Publishes a cooperative hard purge for live ThreadCache owners.
+///
+/// The request is observed only at owner-thread slow paths or explicit calls to
+/// `am_thread_cache_purge`; it never lets a controller touch another TLS cache.
 void am_request_thread_cache_purge() noexcept;
 
 }// namespace ammalloc
 
-#endif// AMMALLOC_AMMALLOC_H
+#endif // AMMALLOC_AMMALLOC_H

@@ -1,7 +1,7 @@
 #ifndef AMMALLOC_ATTRIBUTES_H
 #define AMMALLOC_ATTRIBUTES_H
 
-/// @file
+/// @file attributes.h
 /// @brief Portable compiler attributes and builtin wrappers used by ammalloc.
 ///
 /// This self-contained counterpart of `include/macros.h` keeps ammalloc's
@@ -23,6 +23,9 @@
 #endif
 
 /// @brief Emits a compiler prefetch hint when supported.
+/// @param addr Address to prefetch into cache.
+/// @param ... Forwarded locality and read/write hints to `__builtin_prefetch`.
+/// @note Expands to nothing when the compiler builtin is unavailable.
 #if AM_HAS_BUILTIN(__builtin_prefetch)
 #define AM_BUILTIN_PREFETCH(...) __builtin_prefetch(__VA_ARGS__)
 #else
@@ -61,9 +64,12 @@
 #define AM_UNLIKELY
 #endif
 
-/// @brief Provides portable no-inline and force-inline function annotations.
+/// @brief Prevents the compiler from inlining the annotated function.
+/// @note Uses `__attribute__((noinline))` on GCC/Clang, `__declspec(noinline)` on MSVC.
 #if defined(__GNUC__) || defined(__clang__)
 #define AM_NOINLINE __attribute__((noinline))
+/// @brief Requests the compiler to always inline the annotated function.
+/// @note Uses `__attribute__((always_inline)) inline` on GCC/Clang, `__forceinline` on MSVC.
 #define AM_ALWAYS_INLINE __attribute__((always_inline)) inline
 #elif defined(_MSC_VER)
 #define AM_NOINLINE __declspec(noinline)
@@ -73,4 +79,4 @@
 #define AM_ALWAYS_INLINE inline
 #endif
 
-#endif// AMMALLOC_ATTRIBUTES_H
+#endif // AMMALLOC_ATTRIBUTES_H

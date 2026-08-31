@@ -1,7 +1,7 @@
 #ifndef AMMALLOC_COMMON_H
 #define AMMALLOC_COMMON_H
 
-/// @file
+/// @file common.h
 /// @brief Low-level address, alignment, CPU, and configuration parsing helpers.
 
 #include "ammalloc/attributes.h"

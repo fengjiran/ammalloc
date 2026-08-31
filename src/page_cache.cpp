@@ -1,3 +1,6 @@
+/// @file page_cache.cpp
+/// @brief Radix-tree page map and page-count-bucketed span cache with optional sharding.
+
 #include "ammalloc/page_cache.h"
 
 #include <limits>

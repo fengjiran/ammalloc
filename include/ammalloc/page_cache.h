@@ -1,7 +1,7 @@
 #ifndef AMMALLOC_PAGE_CACHE_H
 #define AMMALLOC_PAGE_CACHE_H
 
-/// @file
+/// @file page_cache.h
 /// @brief Sharded page cache and lock-free-read radix page map.
 ///
 /// PageCache manages Span splitting, owner-shard-local coalescing, and fallback
@@ -9,8 +9,9 @@
 /// fixed-depth radix tree whose lookup path performs only atomic loads.
 /// @see docs/designs/04-page-cache.md, docs/designs/07-span-and-pagemap.md
 
-// Selects the sharded PageCache implementation. The single-mutex legacy
-// variant in the #else branch is retained only as a fallback.
+// Internal build knob: selects the sharded PageCache implementation.
+// Defined by default; undefine to fall back to the single-mutex legacy variant.
+// Downstream code must not depend on this symbol being defined or undefined.
 #define USE_PAGECACHE_SHARD
 
 #include "ammalloc/assert.h"
@@ -30,6 +31,7 @@ uint64_t GetCurrentTimeMs() noexcept;
 /// @brief Stores the wide root level of the PageMap radix tree.
 /// @note Page alignment preserves the fixed page-sized node layout.
 struct alignas(SystemConfig::PAGE_SIZE) RadixRootNode {
+    // Published via release store in EnsurePathLocked; read via acquire load in GetSpan.
     std::array<std::atomic<void*>, PageConfig::RADIX_ROOT_SIZE> children;
 
     RadixRootNode() noexcept {
@@ -42,6 +44,7 @@ struct alignas(SystemConfig::PAGE_SIZE) RadixRootNode {
 /// @brief Stores either child-node or Span pointers in the PageMap radix tree.
 /// @note Page alignment lets ObjectPool dedicate page-aligned slots to nodes.
 struct alignas(SystemConfig::PAGE_SIZE) RadixNode {
+    // Published via release store in EnsurePathLocked; read via acquire load in GetSpan.
     std::array<std::atomic<void*>, PageConfig::RADIX_NODE_SIZE> children;
 
     RadixNode() noexcept {
@@ -126,6 +129,7 @@ private:
 
     // Published with release semantics once initialized.
     inline static std::atomic<RadixRootNode*> root_ = nullptr;
+    // Static backing storage for root_; avoids heap allocation during initialization.
     inline static RadixRootNode root_storage_{};
     inline static ObjectPool<RadixNode> radix_node_pool_{};
     /// Protects root initialization, monotonically growing node links, and every
@@ -185,6 +189,7 @@ private:
     std::mutex mutex_;
     /// Free spans indexed by page count; index zero is unused.
     std::array<SpanList, PageConfig::MAX_PAGE_NUM + 1> span_lists_{};
+    // Protected by mutex_.
     ObjectPool<Span> span_pool_{};
 
     /// @brief Allocates a Span while the shard mutex is held.
@@ -336,11 +341,13 @@ private:
 
     /// @brief Selects an owner shard for a new allocation.
     /// @param page_num Requested page count.
-    /// @return Active shard index; the current rollout always selects zero.
+    /// @return Active shard index.
+    /// @note Currently returns shard 0.
     AM_NODISCARD uint16_t SelectShardForAlloc(size_t page_num) noexcept {
         return 0;
     }
 
+    // Requires `shard_id < active_shard_count_`. Debug-only check.
     AM_NODISCARD PageCacheShard& GetShard(uint16_t shard_id) noexcept {
         AM_DCHECK(shard_id < active_shard_count_);
         return shards_[shard_id];
@@ -351,6 +358,7 @@ private:
         return shards_[shard_id];
     }
 
+    // Extracts owner from `span->owner_shard_id`; requires non-null span with valid shard ID.
     AM_NODISCARD PageCacheShard& OwnerShard(Span* span) noexcept {
         AM_DCHECK(span != nullptr);
         AM_DCHECK(span->owner_shard_id < active_shard_count_);
@@ -400,15 +408,24 @@ public:
     /// @pre All allocator users and PageMap borrowers are quiescent.
     void Reset() noexcept;
 
+    /// @brief Reports whether a page-count bucket is empty.
+    /// @param bucket_idx Page-count bucket index.
+    /// @return True when the bucket contains no free spans.
+    /// @pre `bucket_idx < span_lists_.size()`.
     AM_NODISCARD bool IsBucketEmpty(size_t bucket_idx) const noexcept {
         AM_DCHECK(bucket_idx < span_lists_.size());
         return span_lists_[bucket_idx].empty();
     }
 
+    /// @brief Returns the global mutex protecting this legacy PageCache.
+    /// @return Mutable reference to the mutex.
     AM_NODISCARD std::mutex& GetMutex() noexcept {
         return mutex_;
     }
 
+    /// @brief Returns a page-count bucket from the legacy PageCache.
+    /// @param i Page-count bucket index.
+    /// @return Mutable reference to the selected SpanList.
     AM_NODISCARD SpanList& GetSpanList(size_t i) noexcept {
         return span_lists_[i];
     }
@@ -418,6 +435,7 @@ private:
     std::mutex mutex_;
     /// Free spans indexed by page count; index zero is unused.
     std::array<SpanList, PageConfig::MAX_PAGE_NUM + 1> span_lists_{};
+    // Protected by mutex_.
     ObjectPool<Span> span_pool_{};
 
     PageCache() = default;

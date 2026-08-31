@@ -1,8 +1,9 @@
-// ThreadCache implementation.
-//
-// The hot path is intentionally tiny: one TLS FreeList pop/push plus a quota
-// check. More expensive policy decisions are deferred to the cold refill/trim
-// helpers below so the common case stays branch-light and lock-free.
+/// @file thread_cache.cpp
+/// @brief ThreadCache slow-path implementation: refill, trim, and quota policy.
+///
+/// The hot path is intentionally tiny: one TLS FreeList pop/push plus a quota
+/// check. More expensive policy decisions are deferred to the cold refill/trim
+/// helpers so the common case stays branch-light and lock-free.
 #include "ammalloc/thread_cache.h"
 #include "ammalloc/central_cache.h"
 
@@ -233,7 +234,7 @@ void* ThreadCache::FetchFromCentralCache(FreeList& list, size_t idx,
     const auto fetch_num = std::min(batch_num, list.max_size());
     const size_t fetched = CentralCache::GetInstance().FetchRange(list, fetch_num, aligned_size);
     if (fetched == 0) {
-        return nullptr;// Out of memory
+        return nullptr; // CentralCache exhausted for this size class.
     }
 
     // A partial refill signals memory pressure: hold the quota and the decay
