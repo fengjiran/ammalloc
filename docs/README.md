@@ -26,7 +26,7 @@
 |---|---|---|---|
 | [ammalloc_design.md](designs/ammalloc_design.md) | 架构总览（00- 级，全系统权威） | Current | 2026-08-19 |
 | [01-size-class.md](designs/01-size-class.md) | 尺寸类别映射：边界语义、对齐与查表 | Current | 2026-08-19 |
-| [02-thread-cache.md](designs/02-thread-cache.md) | TLS 前端缓存：无锁快路径、慢启动与水位线 | Current | 2026-08-19 |
+| [02-thread-cache.md](designs/02-thread-cache.md) | TLS 前端缓存：无锁快路径、慢启动与水位线、容量限制分层与参数表 | Current | 2026-08-31 |
 | [03-central-cache.md](designs/03-central-cache.md) | 中端缓存：TransferCache 与 SpanList、桶锁 | Current | 2026-08-19 |
 | [04-page-cache.md](designs/04-page-cache.md) | 后端页缓存：分片、Span 切分与合并 | Current | 2026-08-19 |
 | [05-page-allocator.md](designs/05-page-allocator.md) | OS 交互层：mmap/munmap/madvise、映射缓存 | Current | 2026-08-19 |
