@@ -61,7 +61,7 @@ AM_NODISCARD QuotaState NextAfterOverflow(size_t current, size_t batch,
 /// to PageCache and eventually become reclaimable by the scavenger.
 enum class ThreadCacheTrimMode : uint8_t {
     kReuse,
-    kRelease,
+    kRelease
 };
 
 /// @brief Slow-path-only telemetry for ThreadCache retention control.
@@ -137,18 +137,17 @@ public:
         AM_DCHECK(original_size <= SizeConfig::MAX_TC_SIZE);
         // One Index call serves both paths; RoundUp(size) == Size(Index(size))
         // by construction, so the class size is derived only when needed.
-        size_t idx = SizeClass::Index(original_size);
-        auto& list = free_lists_[idx];
+        const auto idx = SizeClass::Index(original_size);
 
         // Hot path: satisfy the request entirely from TLS state.
         // clang-format off
-        if (!list.empty()) AM_LIKELY {
+        if (auto& list = free_lists_[idx];!list.empty()) AM_LIKELY {
             return list.pop();
         }
         // clang-format on
 
         // Refill from CentralCache only after local capacity is exhausted.
-        return FetchFromCentralCache(list, idx, SizeClass::Size(idx));
+        return FetchFromCentralCache(idx);
     }
 
     /// @brief Returns one object to its size-class FreeList.
@@ -174,7 +173,7 @@ public:
         // The class size is needed only on this slow path.
         // clang-format off
         if (list.size() > list.max_size()) AM_UNLIKELY {
-            DeallocateSlowPath(list, idx, SizeClass::Size(idx));
+            DeallocateSlowPath(idx);
         }
         // clang-format on
     }
@@ -252,20 +251,27 @@ private:
     /// Last cooperative trim generation observed by this owner thread.
     uint64_t observed_trim_epoch_{0};
 
+    // Packed as `(epoch << 1) | mode`. One atomic publication keeps concurrent
+    // pressure requesters from pairing one request's epoch with another
+    // request's mode; this state is never read on a normal ThreadCache hit.
+    inline static std::atomic<uint64_t> trim_request_{0};
+
     /// @brief Refills an empty FreeList from CentralCache and updates its quota.
     ///
     /// The quota follows a two-stage policy:
     /// - exponential warmup until one batch,
     /// - linear growth up to a bounded multiple of the batch size.
-    AM_NOINLINE void* FetchFromCentralCache(FreeList& list, size_t idx,
-                                            size_t aligned_size) noexcept;
+    /// @param idx Size-class index identifying the FreeList to refill; the
+    ///        object size is derived as `SizeClass::Size(idx)`.
+    AM_NOINLINE void* FetchFromCentralCache(size_t idx) noexcept;
 
     /// @brief Trims one batch to CentralCache and applies quota decay.
     ///
     /// Repeated overflow trims without intervening refill demand reduce
     /// `max_size`, preventing long-lived threads from pinning burst-era quotas.
-    AM_NOINLINE void DeallocateSlowPath(FreeList& list, size_t idx,
-                                        size_t aligned_size) noexcept;
+    /// @param idx Size-class index identifying the FreeList to trim; the
+    ///        object size is derived as `SizeClass::Size(idx)`.
+    AM_NOINLINE void DeallocateSlowPath(size_t idx) noexcept;
 
     /// @brief Updates one class quota and its aggregate byte reservation.
     void SetQuota(size_t idx, size_t max_size) noexcept;
@@ -281,11 +287,6 @@ private:
 
     /// @brief Returns true if increasing a class quota fits the byte budget.
     AM_NODISCARD bool CanGrowQuota(size_t idx, size_t next_max_size) const noexcept;
-
-    // Packed as `(epoch << 1) | mode`. One atomic publication keeps concurrent
-    // pressure requesters from pairing one request's epoch with another
-    // request's mode; this state is never read on a normal ThreadCache hit.
-    inline static std::atomic<uint64_t> trim_request_{0};
 };
 
 // CreateThreadCache reserves exactly one SystemAlloc page for this object.

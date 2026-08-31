@@ -223,9 +223,10 @@ void ThreadCache::Trim(ThreadCacheTrimMode mode, size_t target_bytes) noexcept {
     }
 }
 
-void* ThreadCache::FetchFromCentralCache(FreeList& list, size_t idx,
-                                         size_t aligned_size) noexcept {
+void* ThreadCache::FetchFromCentralCache(size_t idx) noexcept {
     ObserveGlobalTrimRequest();
+    auto& list = free_lists_[idx];
+    const auto aligned_size = SizeClass::Size(idx);
     const auto batch_num = SizeClass::CalculateBatchSize(aligned_size);
 
     // Refill only up to the current local quota. Slow-start intentionally keeps
@@ -234,7 +235,7 @@ void* ThreadCache::FetchFromCentralCache(FreeList& list, size_t idx,
     const auto fetch_num = std::min(batch_num, list.max_size());
     const size_t fetched = CentralCache::GetInstance().FetchRange(list, fetch_num, aligned_size);
     if (fetched == 0) {
-        return nullptr; // CentralCache exhausted for this size class.
+        return nullptr;// CentralCache exhausted for this size class.
     }
 
     // A partial refill signals memory pressure: hold the quota and the decay
@@ -244,8 +245,8 @@ void* ThreadCache::FetchFromCentralCache(FreeList& list, size_t idx,
     }
 
     // Fresh allocation demand cancels any prior decay trend for this class.
-    const auto next_max_size = quota_policy::NextAfterRefill(list.max_size(), batch_num);
-    if (CanGrowQuota(idx, next_max_size)) {
+    if (const auto next_max_size = quota_policy::NextAfterRefill(list.max_size(), batch_num);
+        CanGrowQuota(idx, next_max_size)) {
         SetQuota(idx, next_max_size);
     } else {
         g_thread_cache_stats.budget_denied_growth.fetch_add(1, std::memory_order_relaxed);
@@ -254,9 +255,10 @@ void* ThreadCache::FetchFromCentralCache(FreeList& list, size_t idx,
     return list.pop();
 }
 
-void ThreadCache::DeallocateSlowPath(FreeList& list, size_t idx,
-                                     size_t aligned_size) noexcept {
+void ThreadCache::DeallocateSlowPath(size_t idx) noexcept {
     ObserveGlobalTrimRequest();
+    auto& list = free_lists_[idx];
+    const auto aligned_size = SizeClass::Size(idx);
     if (list.size() <= list.max_size()) {
         return;
     }
