@@ -27,18 +27,18 @@ const ThreadCacheStats& GetThreadCacheStats() noexcept {
 
 namespace quota_policy {
 
-size_t NextAfterRefill(size_t current, size_t batch) noexcept {
-    if (current < batch) {
+size_t NextAfterRefill(size_t cur_max_size, size_t batch) noexcept {
+    if (cur_max_size < batch) {
         // Exponential warmup until one batch.
-        return std::min(batch, current + std::max<size_t>(1, current));
+        return std::min(batch, cur_max_size + std::max<size_t>(1, cur_max_size));
     }
 
-    if (current < batch * kMaxQuotaBatches) {
+    if (cur_max_size < batch * kMaxQuotaBatches) {
         // Linear growth above one batch, bounded at kMaxQuotaBatches batches.
         return std::min(batch * kMaxQuotaBatches,
-                        current + std::max<size_t>(1, batch / kMaxQuotaBatches));
+                        cur_max_size + std::max<size_t>(1, batch / kMaxQuotaBatches));
     }
-    return current;
+    return cur_max_size;
 }
 
 QuotaState NextAfterOverflow(size_t current, size_t batch, size_t overages) noexcept {
@@ -87,36 +87,42 @@ size_t ThreadCache::CachedBytesSnapshot() const noexcept {
     return total;
 }
 
-bool ThreadCache::CanGrowQuota(size_t idx, size_t next_max_size) const noexcept {
-    const auto current = free_lists_[idx].max_size();
-    if (next_max_size <= current) {
+bool ThreadCache::CanSetQuota(size_t idx, size_t next_max_size) const noexcept {
+    // A shrink/no-op transition is always admissible: it releases
+    // reservation and must never be blocked, or decay/Trim could not
+    // hand budget back to the shared pool.
+    const auto cur_max_size = free_lists_[idx].max_size();
+    if (next_max_size <= cur_max_size) {
         return true;
     }
 
-    const auto delta = (next_max_size - current) * SizeClass::Size(idx);
+    // Growth consumes budget: approve only when the byte delta fits
+    // the headroom (budget minus reserved quota).
+
+    const auto delta = (next_max_size - cur_max_size) * SizeClass::Size(idx);
     return delta <= cache_budget_bytes_ - reserved_quota_bytes_;
 }
 
-void ThreadCache::SetQuota(size_t idx, size_t max_size) noexcept {
+void ThreadCache::SetQuota(size_t idx, size_t new_max_size) noexcept {
     auto& list = free_lists_[idx];
-    const auto old_max_size = list.max_size();
-    if (old_max_size == max_size) {
+    const auto cur_max_size = list.max_size();
+    if (cur_max_size == new_max_size) {
         return;
     }
 
     const auto class_size = SizeClass::Size(idx);
-    if (max_size > old_max_size) {
-        const size_t delta = (max_size - old_max_size) * class_size;
+    if (new_max_size > cur_max_size) {
+        const size_t delta = (new_max_size - cur_max_size) * class_size;
         reserved_quota_bytes_ += delta;
         g_thread_cache_stats.reserved_quota_bytes.fetch_add(delta,
                                                             std::memory_order_relaxed);
     } else {
-        const size_t delta = (old_max_size - max_size) * class_size;
+        const size_t delta = (cur_max_size - new_max_size) * class_size;
         reserved_quota_bytes_ -= delta;
         g_thread_cache_stats.reserved_quota_bytes.fetch_sub(delta,
                                                             std::memory_order_relaxed);
     }
-    list.set_max_size(max_size);
+    list.set_max_size(new_max_size);
 }
 
 void ThreadCache::RequestGlobalTrim(ThreadCacheTrimMode mode) noexcept {
@@ -246,11 +252,12 @@ void* ThreadCache::FetchFromCentralCache(size_t idx) noexcept {
 
     // Fresh allocation demand cancels any prior decay trend for this class.
     if (const auto next_max_size = quota_policy::NextAfterRefill(list.max_size(), batch_num);
-        CanGrowQuota(idx, next_max_size)) {
+        CanSetQuota(idx, next_max_size)) {
         SetQuota(idx, next_max_size);
     } else {
         g_thread_cache_stats.budget_denied_growth.fetch_add(1, std::memory_order_relaxed);
     }
+
     list.set_overages(0);
     return list.pop();
 }

@@ -42,7 +42,7 @@ struct QuotaState {
 /// @brief Next quota after a successful central refill.
 /// Two-stage growth: exponential warmup below one batch, then linear growth up
 /// to kMaxQuotaBatches batches. Returns the unchanged quota at the ceiling.
-AM_NODISCARD size_t NextAfterRefill(size_t current, size_t batch) noexcept;
+AM_NODISCARD size_t NextAfterRefill(size_t cur_max_size, size_t batch) noexcept;
 
 /// @brief Next quota state after a slow-path overflow release.
 /// Repeated overflow without intervening refill decays the quota by one batch
@@ -141,7 +141,7 @@ public:
 
         // Hot path: satisfy the request entirely from TLS state.
         // clang-format off
-        if (auto& list = free_lists_[idx];!list.empty()) AM_LIKELY {
+        if (auto& list = free_lists_[idx]; !list.empty()) AM_LIKELY {
             return list.pop();
         }
         // clang-format on
@@ -162,7 +162,7 @@ public:
     ///       when local occupancy reaches the current per-class limit.
     AM_ALWAYS_INLINE void Deallocate(void* ptr, size_t idx) noexcept {
         AM_DCHECK(ptr != nullptr);
-        AM_DCHECK(idx < SizeClass::kNumSizeClasses);
+        AM_HCHECK(idx < SizeClass::kNumSizeClasses, "class index out of range");
 
         auto& list = free_lists_[idx];
 
@@ -247,7 +247,7 @@ private:
     /// accounting only and changes exclusively on refill/overflow/trim paths.
     size_t reserved_quota_bytes_{0};
     /// Aggregate quota-capacity ceiling for this owner thread.
-    size_t cache_budget_bytes_{kDefaultCacheBudgetBytes};
+    const size_t cache_budget_bytes_{kDefaultCacheBudgetBytes};
     /// Last cooperative trim generation observed by this owner thread.
     uint64_t observed_trim_epoch_{0};
 
@@ -273,9 +273,6 @@ private:
     ///        object size is derived as `SizeClass::Size(idx)`.
     AM_NOINLINE void DeallocateSlowPath(size_t idx) noexcept;
 
-    /// @brief Updates one class quota and its aggregate byte reservation.
-    void SetQuota(size_t idx, size_t max_size) noexcept;
-
     /// @brief Returns the fixed one-object-per-class quota reservation.
     AM_NODISCARD static constexpr size_t InitialReservedQuotaBytes() noexcept {
         size_t total = 0;
@@ -285,8 +282,14 @@ private:
         return total;
     }
 
-    /// @brief Returns true if increasing a class quota fits the byte budget.
-    AM_NODISCARD bool CanGrowQuota(size_t idx, size_t next_max_size) const noexcept;
+    /// @brief True if applying the quota transition for a class is admissible.
+    ///
+    /// Shrink and no-op transitions always pass (they release reservation);
+    /// growth must fit inside the remaining per-thread byte budget.
+    AM_NODISCARD bool CanSetQuota(size_t idx, size_t next_max_size) const noexcept;
+
+    /// @brief Updates one class quota and its aggregate byte reservation.
+    void SetQuota(size_t idx, size_t new_max_size) noexcept;
 };
 
 // CreateThreadCache reserves exactly one SystemAlloc page for this object.
