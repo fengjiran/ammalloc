@@ -14,16 +14,14 @@
 ThreadCache 是分配器的前端缓存：每个线程一个 TLS 实例，处理绝大多数分配/释放请求。目标：
 
 - 快路径（一次 FreeList pop/push）完全无锁、无系统调用，单线程极速路径约 3.8 ns（见架构总览性能基线）。
-- 通过慢启动与水位线动态调节每类配额，并以 aggregate quota-capacity budget 限制跨类
-  总额，防止线程长期钉住突发期缓存。
-- 在不触碰常见 push/pop 路径的前提下，提供 owner-thread trim/purge 和 cooperative
-  pressure request，使空 Span 最终能返回 PageCache。
+- 通过慢启动与水位线动态调节每类配额，并以 aggregate quota-capacity budget 限制跨类总额，防止线程长期钉住突发期缓存。
+- 在不触碰常见 push/pop 路径的前提下，提供 owner-thread trim/purge 和 cooperative pressure request，使空 Span 最终能返回 PageCache。
 
 ## 2. 职责与边界
 
 - **提供**：`Allocate`/`Deallocate`（快路径）+ `ReleaseAll`（TLS 销毁时全量归还）。
 - **请求**：`CentralCache::FetchRange`（refill）、`CentralCache::ReleaseListToSpans`（trim/全量归还）。
-- **所有权**：FreeList 中的对象所有权始终属于分配器系统；ThreadCache 只持有借用。TLS 析构时 `ReleaseAll` 把全部对象归还 CentralCache 后再销毁 ThreadCache 元数据（`PageAllocator::SystemFree`）。
+- **所有权**：FreeList 中的对象所有权始终属于分配器系统；ThreadCache 只是借用。TLS 析构时 `ReleaseAll` 把全部对象归还 CentralCache 后再销毁 ThreadCache 元数据（`PageAllocator::SystemFree`）。
 - **生命周期**：TLS 指针由 `thread_local ThreadCacheCleaner` 管理；`g_ThreadCacheAlreadyDestructed` 防止 TLS 析构阶段的递归分配重建缓存。
 
 ## 3. 关键数据结构
@@ -71,10 +69,10 @@ ThreadCache 是分配器的前端缓存：每个线程一个 TLS 实例，处理
 
 **增长策略 `NextAfterRefill`（`kMaxQuotaBatches = 8`）**
 
-```text
-if (current < batch)     return min(batch, current + max(1, current));       // ① 指数预热
+```c++
+if (current < batch) return min(batch, current + max(1, current));       // ① 指数预热
 if (current < batch * kMaxQuotaBatches) return min(batch * kMaxQuotaBatches, current + max(1, batch / kMaxQuotaBatches)); // ② 线性增长
-return current;                                                             // ③ kMaxQuotaBatches×batch 封顶
+return current;                    // ③ kMaxQuotaBatches×batch 封顶
 ```
 
 - ① 配额低于一个 batch 时翻倍（`max(1, current)` 兜住 `current == 0` 边界），快速收敛。
@@ -83,8 +81,8 @@ return current;                                                             // �
 
 **衰减策略 `NextAfterOverflow`（`kMaxOverages = 3`）**
 
-```text
-if (current <= batch)             return {current, 0};                      // 下限：不留衰减状态
+```c++
+if (current <= batch) return {current, 0};                      // 下限：不留衰减状态
 if (overages + 1 >= kMaxOverages) return {max(current - batch, batch), 0};  // 连续 3 次：降一个 batch
 return {current, overages + 1};                                             // 只累计计数
 ```
@@ -179,7 +177,7 @@ ThreadCache 的容量限制不是一段独立的策略代码，而是**五道分
 | L0 入口尺寸 | 哪些对象能进 ThreadCache | `SizeConfig::MAX_TC_SIZE` = 32 KiB | `am_malloc_slow_path`：更大请求直连 `PageCache::AllocSpan` | 一次 `>` 比较 | §1、§5 |
 | L1 单类配额 | 每个尺寸类可驻留的**对象个数** | `max_size ≤ kMaxQuotaBatches × batch` | 满额 refill 涨、部分 refill 保持、连续溢出衰减 | 冷路径纯函数 | §6.1、§6.2 |
 | L2 溢出即裁 | 超出配额的驻留部分 | 每事件至多归还 1 个 batch | 每次 `Deallocate` push 后判 `size() > max_size()` | 快路径一次比较；慢路径 O(`max_size`) | §6.3、§6.6 |
-| L3 聚合预算 | 跨类**总配额容量** | `cache_budget_bytes_` = 2 MiB/thread，`CanGrowQuota` 逐一否决 | 每次配额增长前 | 慢路径 `Σ` 增量记账 | §6.4 |
+| L3 聚合预算 | 跨类**总配额容量** | `cache_budget_bytes_` = 2 MiB/thread，`CanSetQuota` 逐一否决 | 每次配额增长前 | 慢路径 `Σ` 增量记账 | §6.4 |
 | L4 主动收敛 | 已驻留对象 + 配额本身 | `kReuse` → 1 MiB 软目标；`kRelease` → 0 字节 | owner `Trim`/`purge`、cooperative epoch、线程退出 `ReleaseAll` | 固定 `kNumSizeClasses` 类扫描 | §4、§6.4、§6.5 |
 
 - L0–L3 是**常驻的被动约束**（随分配/释放自然生效）；L4 是**事件驱动的主动收敛**，用于把
@@ -216,7 +214,7 @@ ThreadCache 的容量限制不是一段独立的策略代码，而是**五道分
 | `ThreadCache::kDefaultCacheBudgetBytes` | 2 MiB | `ThreadCache`（thread_cache.h） | 单线程 aggregate quota-capacity ceiling |
 | `ThreadCache::kDefaultTrimTargetBytes` | 1 MiB | `ThreadCache`（thread_cache.h） | `kReuse` 软 trim 目标（best-effort） |
 | `ThreadCache::InitialReservedQuotaBytes()` | 207.75 KiB = Σ `kNumSizeClasses` 类 class_size（当前 40） | `ThreadCache`（thread_cache.h） | 构造即预扣的「每类 1 对象」地板，同时是 budget 的下限 |
-| budget 可增长余量 | 1840.25 KiB | 派生：2 MiB − 207.75 KiB | 全部类别共享的增长头寸，由 `CanGrowQuota` 逐一否决 |
+| budget 可增长余量 | 1840.25 KiB | 派生：2 MiB − 207.75 KiB | 全部类别共享的增长头寸，由 `CanSetQuota` 逐一否决 |
 
 **每类配额上限**（`idx` 为 `SizeClass::Index` 的类别编号）
 
@@ -276,7 +274,7 @@ ThreadCache 的容量限制不是一段独立的策略代码，而是**五道分
    320/384/448/512 KiB，与 §6.1「设计意图」末条的 512 KiB 单类上限一致。
 2. **2 MiB aggregate budget 必然成为绑定约束**：`kNumSizeClasses` 类字节上限之和 ≈ 10.0 MiB，远大于单线程
    2 MiB 总额。任一类别单独热起可在 1840.25 KiB 余量内触顶，但多类同时热时后续增长被
-   `CanGrowQuota` 拒绝并累加 `budget_denied_growth`（见 §6.4）。
+   `CanSetQuota` 拒绝并累加 `budget_denied_growth`（见 §6.4）。
 3. **实际驻留对象数比「对象上限」多 1**：`Deallocate` 先 `push` 后判 `size() > max_size()`，
    故瞬时 `size_ ≤ max_size_ + 1`；refill 侧 `fetch_num = min(batch, max_size)` 不再额外扩张
    （见 §6.2）。这也是 §6.6 中 `pop_range_tail` 遍历长度为 `max_size + 1` 的来源。

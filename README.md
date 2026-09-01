@@ -24,6 +24,8 @@ management.
   mapping cache and transparent huge-page hints.
 - A background scavenger periodically applies `MADV_DONTNEED` to long-idle
   Spans to reduce resident physical memory.
+- Cooperative ThreadCache trim/purge control APIs let applications reclaim
+  per-thread cached objects at safepoints without cross-thread TLS access.
 - Core metadata uses fixed-size object pools and intrusive structures to avoid
   recursive allocator entry.
 - Both 48-bit and 57-bit virtual address configurations are supported.
@@ -111,6 +113,10 @@ int main() {
 ```cpp
 void* ammalloc::am_malloc(std::size_t size);
 void ammalloc::am_free(void* ptr);
+void ammalloc::am_thread_cache_trim() noexcept;
+void ammalloc::am_thread_cache_purge() noexcept;
+void ammalloc::am_request_thread_cache_trim() noexcept;
+void ammalloc::am_request_thread_cache_purge() noexcept;
 ```
 
 - `am_malloc(0)` allocates from the minimum size class instead of immediately
@@ -120,8 +126,18 @@ void ammalloc::am_free(void* ptr);
 - `am_free` only accepts an original, live pointer returned by `am_malloc`.
   Mixing it with the system `free`, freeing an interior pointer, or double-freeing
   a pointer is unsupported.
+- `am_thread_cache_trim()` soft-trims the calling thread's ThreadCache without
+  creating one, preserving a bounded warm working set.
+- `am_thread_cache_purge()` purges the calling thread's ThreadCache and drains
+  the global TransferCache, returning local objects to Span bitmaps.
+- `am_request_thread_cache_trim()` / `am_request_thread_cache_purge()` publish
+  process-wide cooperative requests; each owner thread observes them only at its
+  own slow paths or explicit trim/purge safepoints.
 - The current implementation does not replace global `new`/`delete` or
   interpose libc allocation functions.
+
+See [docs/api/public-api.md](docs/api/public-api.md) for the full semantics of
+the ThreadCache control APIs.
 
 ## Build Options
 
@@ -130,6 +146,7 @@ void ammalloc::am_free(void* ptr);
 | `BUILD_TESTS` | `ON` | Build unit tests and enable test-only helpers in the library |
 | `BUILD_BENCHMARKS` | `ON` | Build performance benchmarks |
 | `USE_57BIT_VA` | `OFF` | Define `AM_USE_57BIT_VA` so PageMap covers a 57-bit virtual address space |
+| `AM_HARDENED` | `OFF` | Define `AM_HARDENED` to enable release-time free/double-free/interior-pointer guards |
 
 For example, to build only the library with 57-bit virtual address support:
 
