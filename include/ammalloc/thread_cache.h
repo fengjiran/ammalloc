@@ -48,7 +48,7 @@ AM_NODISCARD size_t NextAfterRefill(size_t cur_max_size, size_t batch) noexcept;
 /// Repeated overflow without intervening refill decays the quota by one batch
 /// (floor: one batch) and resets the counter; otherwise the counter advances.
 /// At the floor, no decay state is retained.
-AM_NODISCARD QuotaState NextAfterOverflow(size_t current, size_t batch,
+AM_NODISCARD QuotaState NextAfterOverflow(size_t cur_max_size, size_t batch,
                                           size_t overages) noexcept;
 
 }// namespace quota_policy
@@ -202,7 +202,7 @@ public:
 
     /// @brief Applies the newest cooperative request at an owner-thread
     /// safepoint, if one exists.
-    void ObserveGlobalTrimRequest() noexcept;
+    void HandleGlobalTrimRequest() noexcept;
 
     /// @brief Returns a FreeList high-water limit for testing.
     /// @param idx Size-class index.

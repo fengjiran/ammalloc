@@ -41,17 +41,17 @@ size_t NextAfterRefill(size_t cur_max_size, size_t batch) noexcept {
     return cur_max_size;
 }
 
-QuotaState NextAfterOverflow(size_t current, size_t batch, size_t overages) noexcept {
-    if (current <= batch) {
+QuotaState NextAfterOverflow(size_t cur_max_size, size_t batch, size_t overages) noexcept {
+    if (cur_max_size <= batch) {
         // At the floor: no decay state needed.
-        return {current, 0};
+        return {cur_max_size, 0};
     }
 
     if (overages + 1 >= kMaxOverages) {
         // Enough consecutive overflows: decay by one batch, floor at one batch.
-        return {std::max(current - batch, batch), 0};
+        return {std::max(cur_max_size - batch, batch), 0};
     }
-    return {current, overages + 1};
+    return {cur_max_size, overages + 1};
 }
 
 }// namespace quota_policy
@@ -138,7 +138,7 @@ void ThreadCache::RequestGlobalTrim(ThreadCacheTrimMode mode) noexcept {
     }
 }
 
-void ThreadCache::ObserveGlobalTrimRequest() noexcept {
+void ThreadCache::HandleGlobalTrimRequest() noexcept {
     const uint64_t request = trim_request_.load(std::memory_order_acquire);
     const uint64_t epoch = request >> 1;
     if (epoch == observed_trim_epoch_) {
@@ -190,7 +190,7 @@ void ThreadCache::Trim(ThreadCacheTrimMode mode, size_t target_bytes) noexcept {
         size_t evict_count = 0;
         if (cached_bytes > target_bytes && evictable > 0) {
             const size_t excess = cached_bytes - target_bytes;
-            const size_t requested = excess / class_size + (excess % class_size != 0);
+            const size_t requested = (excess + class_size - 1) / class_size;
             evict_count = std::min(evictable, requested);
         }
 
@@ -230,7 +230,7 @@ void ThreadCache::Trim(ThreadCacheTrimMode mode, size_t target_bytes) noexcept {
 }
 
 void* ThreadCache::FetchFromCentralCache(size_t idx) noexcept {
-    ObserveGlobalTrimRequest();
+    HandleGlobalTrimRequest();
     auto& list = free_lists_[idx];
     const auto aligned_size = SizeClass::Size(idx);
     const auto batch_num = SizeClass::CalculateBatchSize(aligned_size);
@@ -263,13 +263,17 @@ void* ThreadCache::FetchFromCentralCache(size_t idx) noexcept {
 }
 
 void ThreadCache::DeallocateSlowPath(size_t idx) noexcept {
-    ObserveGlobalTrimRequest();
+    HandleGlobalTrimRequest();
     auto& list = free_lists_[idx];
-    const auto aligned_size = SizeClass::Size(idx);
+
+    // HandleGlobalTrimRequest above may have already drained or contracted this
+    // class (cooperative trim), making the overflow moot: without this gate a
+    // below-quota list would be over-evicted and its decay counters bumped again.
     if (list.size() <= list.max_size()) {
         return;
     }
 
+    const auto aligned_size = SizeClass::Size(idx);
     const auto batch_num = SizeClass::CalculateBatchSize(aligned_size);
 
     // Return at most one batch per overflow event, evicting the oldest objects
@@ -281,10 +285,10 @@ void ThreadCache::DeallocateSlowPath(size_t idx) noexcept {
 
     // Repeated overflow without intervening refill demand decays the quota
     // (see quota_policy::NextAfterOverflow), so burst-era caches do not stick.
-    const auto next =
+    const auto [new_max_size, overages] =
             quota_policy::NextAfterOverflow(list.max_size(), batch_num, list.overages());
-    SetQuota(idx, next.max_size);
-    list.set_overages(next.overages);
+    SetQuota(idx, new_max_size);
+    list.set_overages(overages);
 }
 
 }// namespace ammalloc

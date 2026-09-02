@@ -210,7 +210,7 @@ void am_thread_cache_trim() noexcept {
     if (auto* tc = pTLSThreadCache) {
         // An explicit safepoint must also honor a previously published hard
         // request before applying its own softer local target.
-        tc->ObserveGlobalTrimRequest();
+        tc->HandleGlobalTrimRequest();
         tc->Trim(ThreadCacheTrimMode::kReuse, ThreadCache::kDefaultTrimTargetBytes);
     }
 }
