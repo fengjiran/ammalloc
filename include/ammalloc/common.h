@@ -11,8 +11,7 @@
 #include <cstdint>
 #include <immintrin.h>
 
-namespace ammalloc {
-namespace detail {
+namespace ammalloc::detail {
 
 /// @brief Rounds a size up to a requested alignment.
 /// @param size Size in bytes. Zero maps to one alignment unit.
@@ -84,8 +83,8 @@ size_t ParseSize(const char* str);
 ///         false for null and all other values.
 bool ParseBool(const char* str);
 
-}// namespace detail
+} // namespace ammalloc::detail
 
-}// namespace ammalloc
+
 
 #endif// AMMALLOC_COMMON_H
