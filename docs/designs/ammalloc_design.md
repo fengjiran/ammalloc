@@ -199,7 +199,7 @@ void  am_free(void* ptr);
            Yes    │               │ No
               ┌───▼───────────┐  ┌▼──────────────────┐
               │ 页对齐 + page_num │ │ ThreadCache      │
-              │ PageCache.AllocSpan│ │ FreeList.pop()   │  ← 无锁快路径
+              │ PageCache.AllocSpan│ │ FreeList.Pop()   │  ← 无锁快路径
               └───┬───────────┘  └─┬─────────────────┘
                   │                │ miss → FetchFromCentralCache
                   │           ┌────▼─────────────────┐
@@ -233,7 +233,7 @@ void  am_free(void* ptr);
                           │ No                            └ ≤128页: 合并左右邻居后入桶
               ┌───────────▼───────────┐
               │ ThreadCache.Deallocate │
-              │  FreeList.push (无锁)   │
+              │  FreeList.Push (无锁)   │
               └───────────┬───────────┘
               ┌───────────▼───────────┐
               │ size > max_size ?     │──No──→ return
@@ -278,7 +278,7 @@ struct FreeBlock {
 - **LIFO**：最近释放的对象最先被重新分配，提升缓存局部性。
 - **慢启动水位线**：`max_size_` 初始为 1，refill 压力下指数热身到 1 个 batch、再线性增长到 batch 的有界倍数。
 - **超配衰减**：连续溢出裁剪（`overages_`）使 `max_size_` 批量下降，防止瞬时突发把长期水位线钉在高位。
-- **预取**：`pop()` 对下一节点发出 `prefetch` 指令隐藏内存延迟。
+- **预取**：`Pop()` 对下一节点发出 `prefetch` 指令隐藏内存延迟。
 - **线程归属**：FreeList 非线程安全；ThreadCache 内线程私有，CentralCache 临时列表由调用方加锁。
 
 ### 4.2 Span（连续页区间元数据）
@@ -398,7 +398,7 @@ class alignas(CACHE_LINE_SIZE) ThreadCache {
         size_t idx = SizeClass::Index(aligned_size);
         auto& list = free_lists_[idx];
         if (!list.empty()) AM_LIKELY {
-            return list.pop();              // 快路径：单次 pop
+            return list.Pop();              // 快路径：单次 Pop
         }
         return FetchFromCentralCache(list, aligned_size);  // AM_NOINLINE 冷路径
     }
@@ -406,7 +406,7 @@ class alignas(CACHE_LINE_SIZE) ThreadCache {
     AM_ALWAYS_INLINE void Deallocate(void* ptr, size_t aligned_size) {
         size_t idx = SizeClass::Index(aligned_size);
         auto& list = free_lists_[idx];
-        list.push(ptr);                     // 快路径：单次 push
+        list.Push(ptr);                     // 快路径：单次 Push
         if (list.size() > list.max_size()) AM_UNLIKELY {
             DeallocateSlowPath(list, aligned_size);       // AM_NOINLINE 冷路径
         }
@@ -496,7 +496,7 @@ while (true) {
          PageAllocator::SystemAlloc → 池化 Span 元数据 → PageMap::SetSpan → 返回
          （超大步进不进入页数桶，但保留池化元数据，free 可定位）
     2. 精确匹配：span_lists_[page_num] 非空 → pop_front，标记 used+committed
-    3. 切分：从第一个非空的大桶 span_lists_[i] (i > page_num) pop
+    3. 切分：从第一个非空的大桶 span_lists_[i] (i > page_num) Pop
          - 池化分配小 Span 元数据（失败则大 Span 原样放回，失败原子）
          - 原地收缩大 Span（start_page_idx += n, page_num -= n）并回对应桶
          - PageMap::SetSpan 发布两个 Span
@@ -731,7 +731,7 @@ am_malloc(size)
   │
   ├─ 快路径: pTLSThreadCache != null 且 size <= 32KiB
   │    └─ ThreadCache::Allocate(SizeClass::RoundUp(size))
-  │         ├─ FreeList.pop() ── 命中即返回（无锁，~3.8ns）
+  │         ├─ FreeList.Pop() ── 命中即返回（无锁，~3.8ns）
   │         └─ miss → FetchFromCentralCache（慢路径）
   │
   └─ am_malloc_slow_path(size)
@@ -740,7 +740,7 @@ am_malloc(size)
        │    └─ AlignUp 到页 → page_num
        │         └─ PageCache::AllocSpan(page_num)
        │              ├─ 超大（>128 页）→ SystemAlloc 直接映射
-       │              ├─ exact hit → pop 空闲 Span
+       │              ├─ exact hit → Pop 空闲 Span
        │              ├─ split → 切分大 Span
        │              └─ OS refill → SystemAlloc(128 页) 后循环
        │         └─ 返回 span->GetPageBaseAddr()
@@ -764,7 +764,7 @@ am_free(ptr)
   └─ 小对象
        ├─ TLS 未初始化 → CreateThreadCache()（失败则直接 ReleaseListToSpans 兜底）
        └─ ThreadCache::Deallocate(ptr, aligned_size)
-            ├─ FreeList.push()（无锁快路径）
+            ├─ FreeList.Push()（无锁快路径）
             └─ size > max_size → DeallocateSlowPath
                  └─ 批量归还 CentralCache::ReleaseListToSpans
                       ├─ TransferCache 未满 → 入指针数组
@@ -789,7 +789,7 @@ PageHeapScavenger 线程（jthread，1s 周期）
 | 优化技术 | 实现位置 | 效果 |
 |----------|----------|------|
 | 缓存行对齐 | ThreadCache、Bucket、PageCacheShard、Span（64B） | 消除 false sharing，单缓存行元数据 |
-| 预取指令 | `FreeList::pop()` | 隐藏链表下一跳的内存延迟 |
+| 预取指令 | `FreeList::Pop()` | 隐藏链表下一跳的内存延迟 |
 | LIFO 策略 | FreeList、SpanList | 提升 L1/L2 命中率 |
 | 编译期查表 | `small_index_table_`/`size_table_`/`batch_table_`/`move_page_table_` | 随机大小 O(1)，~26ns |
 | 连续内存布局 | TransferCache backing、ObjectPool chunk | 减少 TLB miss |

@@ -106,8 +106,8 @@ FE-2、FE-5、FE-7 和 FE-13 建议在 Debug/Hardened 构建中增加深度检�
 
 - `ThreadCache` 按 cache line 对齐；
 - 每 size class 一个侵入式 `FreeList`；
-- allocate 快路径为 size-class lookup + `FreeList::pop()`；
-- deallocate 快路径为 `FreeList::push()` + quota 判断；
+- allocate 快路径为 size-class lookup + `FreeList::Pop()`；
+- deallocate 快路径为 `FreeList::Push()` + quota 判断；
 - slow-start quota；
 - overflow 时单 batch 归还；
 - overages 驱动 quota 衰减；

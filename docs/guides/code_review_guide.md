@@ -573,7 +573,7 @@ void* am_malloc(size_t size) {
     
     // ✅ Good: 本地链表操作（无锁）
     if (!tc->free_list.empty()) {
-        return tc->free_list.pop();
+        return tc->free_list.Pop();
     }
     
     // ❌ Bad: 热路径持有锁
@@ -755,7 +755,7 @@ RadixNode* GetRoot() {
 // 优化前的热路径
 void* ThreadCache::Allocate(size_t size) {
     std::lock_guard<std::mutex> lock(mutex_);  // ❌ 热路径持锁
-    return free_list_.pop();
+    return free_list_.Pop();
 }
 ```
 
@@ -768,7 +768,7 @@ void* ThreadCache::Allocate(size_t size) {
 // 使用无锁数据结构
 void* ThreadCache::Allocate(size_t size) {
     // ✅ 无锁，纯原子操作
-    return free_list_.pop();  // intrusive list，无锁
+    return free_list_.Pop();  // intrusive list，无锁
 }
 ```
 
