@@ -7,14 +7,14 @@ performance issues, hard bugs, API design, memory management,
 and problems where the implementation direction is unclear.
 """
 
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 model_reasoning_effort = "xhigh"
 
 # 使用 1M 上下文
-model_context_window = 1000000
+model_context_window = 1050000
 
-# 达到 90%（900K）时自动压缩历史上下文
-model_auto_compact_token_limit = 900000
+# 达到 90% 时自动压缩历史上下文
+model_auto_compact_token_limit = 945000
 
 # 按整个 active context 计算阈值
 model_auto_compact_token_limit_scope = "total"
