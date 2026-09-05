@@ -20,7 +20,8 @@ using namespace ammalloc;
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((tls_model("initial-exec")))
 #endif
-thread_local ThreadCache* pTLSThreadCache = nullptr;
+
+thread_local ThreadCache* ptls = nullptr;
 thread_local bool g_ThreadCacheAlreadyDestructed = false;
 
 ThreadCache* CreateThreadCache() noexcept {
@@ -31,8 +32,8 @@ ThreadCache* CreateThreadCache() noexcept {
     // All guarded state is thread-local and SystemAlloc is thread-safe, so no
     // cross-thread serialization is needed here; a global mutex would only add
     // a startup contention point.
-    if (pTLSThreadCache) {
-        return pTLSThreadCache;
+    if (ptls) {
+        return ptls;
     }
 
     constexpr auto tc_size = sizeof(ThreadCache);
@@ -41,7 +42,7 @@ ThreadCache* CreateThreadCache() noexcept {
     if (!ptr) {
         return nullptr;
     }
-    return new (ptr) ThreadCache;
+    return ::new (ptr) ThreadCache;
 }
 
 void ReleaseThreadCache(ThreadCache* tc) noexcept {
@@ -58,10 +59,10 @@ void ReleaseThreadCache(ThreadCache* tc) noexcept {
 struct ThreadCacheCleaner {
     ~ThreadCacheCleaner() {
         g_ThreadCacheAlreadyDestructed = true;
-        if (pTLSThreadCache) {
-            pTLSThreadCache->ReleaseAll();
-            ReleaseThreadCache(pTLSThreadCache);
-            pTLSThreadCache = nullptr;
+        if (ptls) {
+            ptls->ReleaseAll();
+            ReleaseThreadCache(ptls);
+            ptls = nullptr;
         }
     }
 };
@@ -118,14 +119,14 @@ AM_NOINLINE void* am_malloc_slow_path(size_t original_size) noexcept {
         return span->GetPageBaseAddr();
     }
 
-    if (!pTLSThreadCache) {
-        pTLSThreadCache = CreateThreadCache();
-        if (!pTLSThreadCache) {
+    if (!ptls) {
+        ptls = CreateThreadCache();
+        if (!ptls) {
             return nullptr;
         }
     }
 
-    return pTLSThreadCache->Allocate(original_size);
+    return ptls->Allocate(original_size);
 }
 
 AM_NOINLINE void am_free_slow_path(void* ptr, Span* span, size_t aligned_size,
@@ -138,9 +139,9 @@ AM_NOINLINE void am_free_slow_path(void* ptr, Span* span, size_t aligned_size,
     }
 
     // clang-format off
-    if (!pTLSThreadCache) AM_UNLIKELY {
-        pTLSThreadCache = CreateThreadCache();
-        if (!pTLSThreadCache) {
+    if (!ptls) AM_UNLIKELY {
+        ptls = CreateThreadCache();
+        if (!ptls) {
             static_cast<FreeBlock*>(ptr)->next = nullptr;
             CentralCache::GetInstance().ReleaseListToSpans(ptr, aligned_size);
             return;
@@ -148,7 +149,7 @@ AM_NOINLINE void am_free_slow_path(void* ptr, Span* span, size_t aligned_size,
     }
     // clang-format on
 
-    pTLSThreadCache->Deallocate(ptr, idx);
+    ptls->Deallocate(ptr, idx);
 }
 
 }// namespace
@@ -157,7 +158,7 @@ namespace ammalloc {
 
 void* am_malloc(size_t original_size) {
     // Read TLS once so the hot path performs a single TLS lookup.
-    auto* tc = pTLSThreadCache;
+    auto* tc = ptls;
     // clang-format off
     if (original_size > SizeConfig::MAX_TC_SIZE || tc == nullptr) AM_UNLIKELY {
         return am_malloc_slow_path(original_size);
@@ -177,23 +178,23 @@ void am_free(void* ptr) {
     if (!span) AM_UNLIKELY {
         return;
     }
+    // clang-format on
 
     AM_HCHECK(span->IsUsed(), "Pointer belongs to a released Span.");
 #if defined(AM_HARDENED) || !defined(NDEBUG)
-    const auto ptr_page = reinterpret_cast<uintptr_t>(ptr) >> SystemConfig::PAGE_SHIFT;
-    AM_HCHECK(ptr_page >= span->start_page_idx &&
-                      ptr_page - span->start_page_idx < span->page_num,
+    const auto page_idx = reinterpret_cast<uintptr_t>(ptr) >> SystemConfig::PAGE_SHIFT;
+    AM_HCHECK(page_idx >= span->start_page_idx && page_idx - span->start_page_idx < span->page_num,
               "Pointer lies outside the mapped Span.");
 #endif
 
     const auto aligned_size = span->aligned_obj_size;
     const size_t idx = span->size_class_idx;
     AM_HCHECK(aligned_size == 0 ||
-                      (idx < SizeClass::kNumSizeClasses &&
-                       SizeClass::Size(idx) == aligned_size),
+                      (idx < SizeClass::kNumSizeClasses && SizeClass::Size(idx) == aligned_size),
               "Corrupted Span size-class metadata.");
 
-    auto* tc = pTLSThreadCache;
+    // clang-format off
+    auto* tc = ptls;
     if (aligned_size == 0 || tc == nullptr) AM_UNLIKELY {
         am_free_slow_path(ptr, span, aligned_size, idx);
         return;
@@ -207,7 +208,7 @@ void am_free(void* ptr) {
 }
 
 void am_thread_cache_trim() noexcept {
-    if (auto* tc = pTLSThreadCache) {
+    if (auto* tc = ptls) {
         // An explicit safepoint must also honor a previously published hard
         // request before applying its own softer local target.
         tc->HandleGlobalTrimRequest();
@@ -216,7 +217,7 @@ void am_thread_cache_trim() noexcept {
 }
 
 void am_thread_cache_purge() noexcept {
-    if (auto* tc = pTLSThreadCache) {
+    if (auto* tc = ptls) {
         tc->Trim(ThreadCacheTrimMode::kRelease, 0);
     }
 
