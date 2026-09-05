@@ -1,9 +1,5 @@
 # `thread_local` 在内存池 Thread Cache 中的作用
 
-> **文档定位**: 调研备忘（非规范，不承诺实现；结论供设计参考，与本仓库 ThreadCache 的关联见 [02-thread-cache.md](../02-thread-cache.md)）
-> **调研目标**: 系统梳理 `thread_local` 在线程本地缓存的语义、收益与成本，为 ammalloc ThreadCache 的 TLS 设计提供背景依据
-> **调研时间**: 2026-08-19
-
 ## 1. `thread_local` 的基本语义
 
 `thread_local` 是 C++11 引入的线程存储期（thread storage duration）关键字。
@@ -85,7 +81,7 @@ Thread 3 ─┘
 
 ---
 
-# 2. 为什么内存池中的 Thread Cache 需要使用 `thread_local`
+## 2. 为什么内存池中的 Thread Cache 需要使用 `thread_local`
 
 高性能内存分配器通常采用分层结构：
 
@@ -120,7 +116,7 @@ Thread 3 ─┘
 
 ---
 
-# 3. 作用一：消除分配快路径上的锁
+### 2.1 作用一：消除分配快路径上的锁
 
 假设所有线程共享一个 Thread Cache：
 
@@ -215,7 +211,7 @@ fast path 不需要：
 
 ---
 
-# 4. 作用二：降低共享数据竞争和 Cache Line Bouncing
+### 2.2 作用二：降低共享数据竞争和 Cache Line Bouncing
 
 即使不使用互斥锁，而是把共享 FreeList 实现成无锁结构：
 
@@ -258,7 +254,7 @@ Core 2 -> ThreadCache 2
 
 ---
 
-# 5. 作用三：提高内存访问局部性
+### 2.3 作用三：提高内存访问局部性
 
 Thread Cache 还可以提高线程的时间局部性和缓存局部性。
 
@@ -306,7 +302,7 @@ TLB Locality
 
 ---
 
-# 6. 作用四：建立“线程私有快路径 + 全局共享慢路径”
+### 2.4 作用四：建立“线程私有快路径 + 全局共享慢路径”
 
 高性能 allocator 通常将不同层级的访问频率设计成：
 
@@ -358,7 +354,7 @@ ThreadCache& CurrentThreadCache() {
 
 ---
 
-# 7. 为什么不能简单把 Thread Cache 放在线程栈上
+## 3. 为什么不能简单把 Thread Cache 放在线程栈上
 
 理论上可以在线程入口定义：
 
@@ -414,7 +410,7 @@ ThreadCache& CurrentThreadCache() {
 
 ---
 
-# 8. `thread_local` 不意味着整个 allocator 不需要同步
+## 4. `thread_local` 不意味着整个 allocator 不需要同步
 
 Thread Cache 私有化，只能解决当前线程访问自己缓存时的同步问题。
 
@@ -454,7 +450,7 @@ Thread Cache 的设计目标不是消除 allocator 中所有同步，而是：
 
 ---
 
-# 9. 跨线程 Free 是必须单独考虑的问题
+## 5. 跨线程 Free 是必须单独考虑的问题
 
 Thread Cache 使用 TLS 后，还必须处理一个常见场景：
 
@@ -499,7 +495,7 @@ Task* p = new Task;
 
 ---
 
-# 10. `thread_local` 本身也存在成本
+## 6. `thread_local` 本身也存在成本
 
 TLS 访问并不是完全免费的。
 
@@ -537,9 +533,14 @@ CentralCache access
 
 因此 Thread Cache 采用 TLS 通常具有明显收益。
 
+这也是 ammalloc 在 `am_malloc`/`am_free` 入口采用「TLS 单次快照」（`auto* tc = ptls;`）的原因：
+把 TLS 读取收敛到每调用一次，空值判定与后续 `Allocate`/`Deallocate` 复用同一个已验证的
+局部指针；若反复直接读 TLS，编译器无法证明变量两次读取之间不被修改，可能重复取址，在热
+路径上放大 TLS 访问成本。
+
 ---
 
-# 11. Thread Cache 的线程退出与析构问题
+## 7. Thread Cache 的线程退出与析构问题
 
 如果直接定义：
 
@@ -584,9 +585,45 @@ ThreadCache TLS 析构
 
 这属于 Thread Cache 工程实现中需要单独处理的生命周期问题。
 
+### 7.1 ammalloc 的实际解法：析构哨兵 `g_ThreadCacheAlreadyDestructed`
+
+ammalloc 采用「TLS 只存指针 + cleaner 析构」的组合，并在此基础上增加一个
+`thread_local bool g_ThreadCacheAlreadyDestructed` 哨兵，专门阻断析构阶段的缓存重建：
+
+```cpp
+thread_local ThreadCache* ptls = nullptr;
+thread_local bool g_ThreadCacheAlreadyDestructed = false;
+```
+
+**执行顺序**（线程退出）：
+
+```text
+线程退出
+  └─ ThreadCacheCleaner::~ThreadCacheCleaner()
+       ├─ g_ThreadCacheAlreadyDestructed = true   ← 最先置位
+       ├─ ptls->ReleaseAll()                     ← 批量归还 CentralCache
+       └─ ReleaseThreadCache(ptls)（~ThreadCache + SystemFree）
+```
+
+**守卫点**：`CreateThreadCache()` 入口检查该标志，已置位则直接返回 `nullptr`，不再
+`SystemAlloc + placement new` 重建。
+
+**为什么必须有哨兵**：线程退出后，其他用户 TLS 对象/静态对象的析构函数仍可能调用
+`am_malloc`/`am_free`，此时 `ptls` 已为 nullptr 或已被释放，懒加载逻辑会触发重建；但
+cleaner 已析构完毕，重建的缓存将永远无人清理（泄漏），且在销毁阶段构造新对象违背线程
+存储期对象的析构顺序约定。
+
+**优雅降级**：`CreateThreadCache()` 因哨兵返回 `nullptr` 后——
+
+- `am_malloc_slow_path` 直接返回 `nullptr`（析构期分配失败安全）；
+- `am_free_slow_path` 绕过 ThreadCache，改走 `ReleaseListToSpans` 直连 CentralCache，
+  保证析构期的 free 仍正确归还、不泄漏。
+
+对应概述见 [ammalloc_design.md §5.1.4](../ammalloc_design.md)。
+
 ---
 
-# 12. 从内存分配器架构理解 Thread Cache
+## 8. 从内存分配器架构理解 Thread Cache
 
 可以将 Thread Cache 类比为 allocator 的 L1 Cache：
 
@@ -619,7 +656,7 @@ Thread Cache 的主要价值是：
 
 ---
 
-# 13. 典型实现形式
+## 9. 典型实现形式
 
 一个简化的实现可以是：
 
@@ -687,7 +724,7 @@ ThreadCache_T2
 
 ---
 
-# 14. 总结
+## 10. 总结
 
 在内存池中：
 
