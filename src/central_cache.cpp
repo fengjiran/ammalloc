@@ -131,8 +131,8 @@ size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num,
 
     if (fetched > 0) {
         // `fetched` is the node count of the head/tail chain built above;
-        // push_range trusts `count` (debug-verified), so keep them in lockstep.
-        block_list.push_range(FreeChain{head, tail, fetched});
+        // PushRange trusts `count` (debug-verified), so keep them in lockstep.
+        block_list.PushRange(FreeChain{head, tail, fetched});
     }
     return fetched;
 }

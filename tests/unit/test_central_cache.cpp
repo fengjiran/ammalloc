@@ -43,7 +43,7 @@ TEST_F(CentralCacheTest, BasicFetchRange) {
     // Clean up.
     void* head = nullptr;
     while (!list.empty()) {
-        void* obj = list.pop();
+        void* obj = list.Pop();
         auto* block = static_cast<FreeBlock*>(obj);
         block->next = static_cast<FreeBlock*>(head);
         head = obj;
@@ -66,7 +66,7 @@ TEST_F(CentralCacheTest, MultipleFetchRange) {
     // Clean up.
     void* head = nullptr;
     while (!list.empty()) {
-        void* obj = list.pop();
+        void* obj = list.Pop();
         auto* block = static_cast<FreeBlock*>(obj);
         block->next = static_cast<FreeBlock*>(head);
         head = obj;
@@ -87,7 +87,7 @@ TEST_F(CentralCacheTest, BasicReleaseListToSpans) {
     // Build the release chain.
     void* head = nullptr;
     while (!list.empty()) {
-        void* obj = list.pop();
+        void* obj = list.Pop();
         auto* block = static_cast<FreeBlock*>(obj);
         block->next = static_cast<FreeBlock*>(head);
         head = obj;
@@ -102,7 +102,7 @@ TEST_F(CentralCacheTest, BasicReleaseListToSpans) {
 
     head = nullptr;
     while (!list.empty()) {
-        void* obj = list.pop();
+        void* obj = list.Pop();
         auto* block = static_cast<FreeBlock*>(obj);
         block->next = static_cast<FreeBlock*>(head);
         head = obj;
@@ -121,7 +121,7 @@ TEST_F(CentralCacheTest, DifferentSizeClasses) {
 
         void* head = nullptr;
         while (!list.empty()) {
-            void* obj = list.pop();
+            void* obj = list.Pop();
             auto* block = static_cast<FreeBlock*>(obj);
             block->next = static_cast<FreeBlock*>(head);
             head = obj;
@@ -143,7 +143,7 @@ TEST_F(CentralCacheTest, LargeBatchAllocation) {
     void* head = nullptr;
     size_t count = 0;
     while (!list.empty()) {
-        void* obj = list.pop();
+        void* obj = list.Pop();
         EXPECT_NE(obj, nullptr);
         auto* block = static_cast<FreeBlock*>(obj);
         block->next = static_cast<FreeBlock*>(head);
@@ -165,7 +165,7 @@ TEST_F(CentralCacheTest, Reset) {
     // Drain the list.
     void* head = nullptr;
     while (!list.empty()) {
-        void* obj = list.pop();
+        void* obj = list.Pop();
         auto* block = static_cast<FreeBlock*>(obj);
         block->next = static_cast<FreeBlock*>(head);
         head = obj;
@@ -182,7 +182,7 @@ TEST_F(CentralCacheTest, Reset) {
     // Clean up.
     head = nullptr;
     while (!list.empty()) {
-        void* obj = list.pop();
+        void* obj = list.Pop();
         auto* block = static_cast<FreeBlock*>(obj);
         block->next = static_cast<FreeBlock*>(head);
         head = obj;
@@ -202,7 +202,7 @@ TEST_F(CentralCacheTest, TransferCacheOomDegradesToSpanList) {
 
     FreeList list;
     ASSERT_GT(central_cache_.FetchRange(list, 1, 64), 0u);
-    void* object = list.pop();
+    void* object = list.Pop();
     static_cast<FreeBlock*>(object)->next = nullptr;
     central_cache_.ReleaseListToSpans(object, 64);
 }
@@ -212,7 +212,7 @@ TEST_F(CentralCacheTest, DirectBitmapReleaseUnpinsSpanWithoutTransferCache) {
     const size_t idx = SizeClass::Index(kSize);
     FreeList list;
     ASSERT_EQ(central_cache_.FetchRange(list, 1, kSize), 1u);
-    void* object = list.pop();
+    void* object = list.Pop();
     auto* span = PageMap::GetSpan(object);
     ASSERT_NE(span, nullptr);
     ASSERT_GT(central_cache_.GetTransferCacheCountForTest(idx), 0u);
@@ -233,7 +233,7 @@ TEST_F(CentralCacheTest, TransferCacheDrainHonorsByteBudgetAndPreservesHealth) {
     const size_t idx = SizeClass::Index(kSize);
     FreeList list;
     ASSERT_EQ(central_cache_.FetchRange(list, 1, kSize), 1u);
-    void* object = list.pop();
+    void* object = list.Pop();
 
     ASSERT_EQ(central_cache_.GetTransferCacheCountForTest(idx), 1u);
     EXPECT_EQ(central_cache_.DrainTransferCaches(kSize - 1), 0u);
@@ -246,7 +246,7 @@ TEST_F(CentralCacheTest, TransferCacheDrainHonorsByteBudgetAndPreservesHealth) {
 
     FreeList verify;
     EXPECT_GT(central_cache_.FetchRange(verify, 1, kSize), 0u);
-    object = verify.pop();
+    object = verify.Pop();
     static_cast<FreeBlock*>(object)->next = nullptr;
     central_cache_.ReleaseListToSpans(object, kSize, CentralReleaseMode::kSpanBitmap);
     central_cache_.DrainTransferCaches(std::numeric_limits<size_t>::max());
@@ -260,7 +260,7 @@ TEST_F(CentralCacheTest, TransferCacheDrainPreservesLifoAcrossColdEndWrap) {
 
     void* head = nullptr;
     while (!first.empty()) {
-        auto* object = static_cast<FreeBlock*>(first.pop());
+        auto* object = static_cast<FreeBlock*>(first.Pop());
         object->next = static_cast<FreeBlock*>(head);
         head = object;
     }
@@ -280,12 +280,12 @@ TEST_F(CentralCacheTest, TransferCacheDrainPreservesLifoAcrossColdEndWrap) {
 
     head = nullptr;
     while (!second.empty()) {
-        auto* object = static_cast<FreeBlock*>(second.pop());
+        auto* object = static_cast<FreeBlock*>(second.Pop());
         object->next = static_cast<FreeBlock*>(head);
         head = object;
     }
     while (!third.empty()) {
-        auto* object = static_cast<FreeBlock*>(third.pop());
+        auto* object = static_cast<FreeBlock*>(third.Pop());
         object->next = static_cast<FreeBlock*>(head);
         head = object;
     }
@@ -294,7 +294,7 @@ TEST_F(CentralCacheTest, TransferCacheDrainPreservesLifoAcrossColdEndWrap) {
 
     FreeList verify;
     EXPECT_GT(central_cache_.FetchRange(verify, 1, kSize), 0u);
-    auto* object = static_cast<FreeBlock*>(verify.pop());
+    auto* object = static_cast<FreeBlock*>(verify.Pop());
     object->next = nullptr;
     central_cache_.ReleaseListToSpans(object, kSize, CentralReleaseMode::kSpanBitmap);
     central_cache_.DrainTransferCaches(std::numeric_limits<size_t>::max());
@@ -312,7 +312,7 @@ TEST_F(CentralCacheTest, ConcurrentTransferDrainDoesNotNestBucketLocks) {
             const size_t fetched = CentralCache::GetInstance().FetchRange(list, 8, kSize);
             void* head = nullptr;
             while (!list.empty()) {
-                auto* object = static_cast<FreeBlock*>(list.pop());
+                auto* object = static_cast<FreeBlock*>(list.Pop());
                 object->next = static_cast<FreeBlock*>(head);
                 head = object;
             }
@@ -347,7 +347,7 @@ TEST_F(CentralCacheTest, ReallocateAfterRelease) {
     // Build the release chain.
     void* head = nullptr;
     while (!list.empty()) {
-        void* obj = list.pop();
+        void* obj = list.Pop();
         auto* block = static_cast<FreeBlock*>(obj);
         block->next = static_cast<FreeBlock*>(head);
         head = obj;
@@ -363,7 +363,7 @@ TEST_F(CentralCacheTest, ReallocateAfterRelease) {
     // Clean up.
     head = nullptr;
     while (!list.empty()) {
-        void* obj = list.pop();
+        void* obj = list.Pop();
         auto* block = static_cast<FreeBlock*>(obj);
         block->next = static_cast<FreeBlock*>(head);
         head = obj;
@@ -388,7 +388,7 @@ TEST_F(CentralCacheTest, StressTest) {
         size_t fetched = central_cache_.FetchRange(list, batch_num, obj_size);
 
         while (!list.empty()) {
-            void* obj = list.pop();
+            void* obj = list.Pop();
             allocated.emplace_back(obj, obj_size);
         }
     }
@@ -439,7 +439,7 @@ TEST_F(CentralCacheTest, MultiThreadedAllocation) {
                 // Clean up.
                 void* head = nullptr;
                 while (!list.empty()) {
-                    void* obj = list.pop();
+                    void* obj = list.Pop();
                     auto* block = static_cast<FreeBlock*>(obj);
                     block->next = static_cast<FreeBlock*>(head);
                     head = obj;
@@ -469,27 +469,27 @@ TEST_F(CentralCacheTest, FreeListOperations) {
     central_cache_.FetchRange(source, 5, obj_size);
 
     // Push
-    void* a = source.pop();
-    void* b = source.pop();
-    void* c = source.pop();
+    void* a = source.Pop();
+    void* b = source.Pop();
+    void* c = source.Pop();
 
-    list.push(a);
-    list.push(b);
-    list.push(c);
+    list.Push(a);
+    list.Push(b);
+    list.Push(c);
 
     EXPECT_FALSE(list.empty());
     EXPECT_EQ(list.size(), 3);
 
     // Pop (LIFO)
-    EXPECT_EQ(list.pop(), c);
-    EXPECT_EQ(list.pop(), b);
-    EXPECT_EQ(list.pop(), a);
+    EXPECT_EQ(list.Pop(), c);
+    EXPECT_EQ(list.Pop(), b);
+    EXPECT_EQ(list.Pop(), a);
 
     EXPECT_TRUE(list.empty());
     EXPECT_EQ(list.size(), 0);
 }
 
-// Point 11: FreeList push_range and pop_range.
+// Point 11: FreeList PushRange and PopRange.
 TEST_F(CentralCacheTest, FreeListPushRange) {
     FreeList list;
     size_t obj_size = 64;
@@ -498,9 +498,9 @@ TEST_F(CentralCacheTest, FreeListPushRange) {
     FreeList source;
     central_cache_.FetchRange(source, 5, obj_size);
 
-    void* a = source.pop();
-    void* b = source.pop();
-    void* c = source.pop();
+    void* a = source.Pop();
+    void* b = source.Pop();
+    void* c = source.Pop();
 
     // Build the chain: a -> b -> c.
     auto* head = static_cast<FreeBlock*>(a);
@@ -511,12 +511,12 @@ TEST_F(CentralCacheTest, FreeListPushRange) {
     node2->next = tail;
     tail->next = nullptr;
 
-    list.push_range(FreeChain{head, tail, 3});
+    list.PushRange(FreeChain{head, tail, 3});
 
     EXPECT_EQ(list.size(), 3);
-    EXPECT_EQ(list.pop(), head);
-    EXPECT_EQ(list.pop(), node2);
-    EXPECT_EQ(list.pop(), tail);
+    EXPECT_EQ(list.Pop(), head);
+    EXPECT_EQ(list.Pop(), node2);
+    EXPECT_EQ(list.Pop(), tail);
     EXPECT_TRUE(list.empty());
 }
 
@@ -545,7 +545,7 @@ TEST_F(CentralCacheTest, SmallObjectAllocation) {
     // Clean up.
     void* head = nullptr;
     while (!list.empty()) {
-        void* obj = list.pop();
+        void* obj = list.Pop();
         auto* block = static_cast<FreeBlock*>(obj);
         block->next = static_cast<FreeBlock*>(head);
         head = obj;
@@ -565,7 +565,7 @@ TEST_F(CentralCacheTest, BoundarySizeAllocation) {
     // Clean up.
     void* head = nullptr;
     while (!list.empty()) {
-        void* obj = list.pop();
+        void* obj = list.Pop();
         auto* block = static_cast<FreeBlock*>(obj);
         block->next = static_cast<FreeBlock*>(head);
         head = obj;
@@ -588,11 +588,11 @@ TEST_F(CentralCacheTest, FetchRangeReturnsPartialOnShortSupply) {
     // Take one object: the only Span has `capacity - 1` free slots left.
     FreeList one;
     ASSERT_EQ(central_cache_.FetchRange(one, 1, size), 1u);
-    void* first = one.pop();
+    void* first = one.Pop();
     auto* span = PageMap::GetSpan(first);
     ASSERT_NE(span, nullptr);
     const size_t capacity = span->capacity;
-    one.push(first);
+    one.Push(first);
 
     // Request `capacity`: only `capacity - 1` are available before the Span is
     // full and the mocked PageCache cannot supply a new one.
@@ -607,13 +607,13 @@ TEST_F(CentralCacheTest, FetchRangeReturnsPartialOnShortSupply) {
     // Clean up.
     void* head = nullptr;
     while (!one.empty()) {
-        void* obj = one.pop();
+        void* obj = one.Pop();
         auto* block = static_cast<FreeBlock*>(obj);
         block->next = static_cast<FreeBlock*>(head);
         head = obj;
     }
     while (!list.empty()) {
-        void* obj = list.pop();
+        void* obj = list.Pop();
         auto* block = static_cast<FreeBlock*>(obj);
         block->next = static_cast<FreeBlock*>(head);
         head = obj;

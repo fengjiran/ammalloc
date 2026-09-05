@@ -66,7 +66,7 @@ enum class ThreadCacheTrimMode : uint8_t {
 
 /// @brief Slow-path-only telemetry for ThreadCache retention control.
 ///
-/// These counters deliberately do not track every push/pop: exact cached bytes
+/// These counters deliberately do not track every Push/Pop: exact cached bytes
 /// are computed only while trimming, so ThreadCache hit paths remain local and
 /// branch-free. `cached_bytes_observed_at_trim` is an accumulated observation,
 /// not a current-process RSS measurement.
@@ -74,9 +74,17 @@ struct ThreadCacheStats {
     // Aggregate `Σ(max_size * class_size)` across live ThreadCache instances.
     // It is quota capacity, not exact cached object bytes or RSS.
     std::atomic<size_t> reserved_quota_bytes{0};
+    // Number of `Trim()` invocations. Incremented on every trim entry,
+    // even when it evicts nothing.
     std::atomic<size_t> trim_count{0};
+    // Accumulated `CachedBytesSnapshot()` observed at `Trim()` entry.
+    // Cumulative observation, not current RSS.
     std::atomic<size_t> cached_bytes_observed_at_trim{0};
+    // Accumulated bytes actually evicted by `Trim()`.
+    // Only grows when `evict_count > 0`.
     std::atomic<size_t> trimmed_bytes{0};
+    // Number of quota growths rejected by `CanSetQuota()` in `FetchFromCentralCache`.
+    // Growth only; allocation never fails for this.
     std::atomic<size_t> budget_denied_growth{0};
 };
 
@@ -106,7 +114,7 @@ public:
     /// @brief Default aggregate quota capacity for one ThreadCache.
     ///
     /// This caps capacity reservations, not exact cached bytes. It is updated
-    /// only when slow paths change a class quota, so the normal push/pop path
+    /// only when slow paths change a class quota, so the normal Push/Pop path
     /// does not perform aggregate accounting.
     static constexpr size_t kDefaultCacheBudgetBytes = 2 * 1024 * 1024;
     /// @brief Target used by owner-thread soft trims and cooperative requests.
@@ -132,7 +140,7 @@ public:
     ///         refill from CentralCache.
     ///
     /// @pre `original_size <= SizeConfig::MAX_TC_SIZE`
-    /// @note The fast path is a single FreeList pop with no locking.
+    /// @note The fast path is a single FreeList Pop() with no locking.
     AM_NODISCARD AM_ALWAYS_INLINE void* Allocate(size_t original_size) noexcept {
         AM_DCHECK(original_size <= SizeConfig::MAX_TC_SIZE);
         // One Index call serves both paths; RoundUp(size) == Size(Index(size))
@@ -142,7 +150,7 @@ public:
         // Hot path: satisfy the request entirely from TLS state.
         // clang-format off
         if (auto& list = free_lists_[idx]; !list.empty()) AM_LIKELY {
-            return list.pop();
+            return list.Pop();
         }
         // clang-format on
 
@@ -158,7 +166,7 @@ public:
     ///
     /// @pre `ptr != nullptr`
     /// @pre `idx < SizeClass::kNumSizeClasses`
-    /// @note The fast path is a single FreeList push. Slow path is entered only
+    /// @note The fast path is a single FreeList Push(). Slow path is entered only
     ///       when local occupancy reaches the current per-class limit.
     AM_ALWAYS_INLINE void Deallocate(void* ptr, size_t idx) noexcept {
         AM_DCHECK(ptr != nullptr);
@@ -167,7 +175,7 @@ public:
         auto& list = free_lists_[idx];
 
         // Hot path: keep recently freed objects local to preserve locality.
-        list.push(ptr);
+        list.Push(ptr);
 
         // Crossing the local quota triggers batched trim back to CentralCache.
         // The class size is needed only on this slow path.

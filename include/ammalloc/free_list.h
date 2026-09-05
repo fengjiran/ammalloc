@@ -39,7 +39,7 @@ struct FreeChain {
 /// @brief Stores free objects in an allocation-free intrusive LIFO chain.
 ///
 /// FreeList stores reclaimed objects by linking through the freed object body
-/// itself, so push/pop do not allocate metadata and remain constant-time.
+/// itself, so Push()/Pop() do not allocate metadata and remain constant-time.
 /// Besides the object chain, the list also carries per-class quota state used
 /// by ThreadCache slow-start and overages-based decay.
 ///
@@ -69,7 +69,7 @@ public:
     /// @brief Pushes one object onto the front of the list.
     /// @param ptr Object whose first pointer-sized bytes may store an intrusive link;
     ///        null is ignored.
-    AM_ALWAYS_INLINE void push(void* ptr) noexcept {
+    AM_ALWAYS_INLINE void Push(void* ptr) noexcept {
         // clang-format off
         if (!ptr) AM_UNLIKELY {
             return;
@@ -85,7 +85,7 @@ public:
     /// @brief Prepends an existing chain to the list.
     /// @param chain Detached chain (head/tail/count); the head/tail pair must be
     ///        a well-formed chain of `count` objects.
-    void push_range(const FreeChain& chain) noexcept {
+    void PushRange(const FreeChain& chain) noexcept {
         if (!chain.head || !chain.tail || chain.count == 0) {
             return;
         }
@@ -105,7 +105,7 @@ public:
     /// @return The detached chain (head/tail/count); count is smaller than `n`
     ///         only when the list holds fewer than `n` objects. The returned
     ///         chain is terminated: `tail->next == nullptr`.
-    AM_NODISCARD FreeChain pop_range(size_t n) noexcept {
+    AM_NODISCARD FreeChain PopRange(size_t n) noexcept {
         FreeChain out;
         FreeBlock* cur = head_;
         for (size_t i = 0; i < n && cur; ++i) {
@@ -134,7 +134,7 @@ public:
     /// @return The detached chain (head/tail/count); the head is the newest
     ///         removed object and the tail the oldest. O(list size) traversal,
     ///         intended for slow paths only.
-    AM_NODISCARD FreeChain pop_range_tail(size_t n) noexcept {
+    AM_NODISCARD FreeChain PopRangeTail(size_t n) noexcept {
         FreeChain out;
         const size_t pop_count = n < size_ ? n : size_;
         if (pop_count == 0) {
@@ -173,7 +173,7 @@ public:
 
     /// @brief Removes the most recently pushed object.
     /// @return Removed object, or null when the list is empty.
-    AM_NODISCARD AM_ALWAYS_INLINE void* pop() noexcept {
+    AM_NODISCARD AM_ALWAYS_INLINE void* Pop() noexcept {
         // clang-format off
         if (empty()) AM_UNLIKELY {
             return nullptr;

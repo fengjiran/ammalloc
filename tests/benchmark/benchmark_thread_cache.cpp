@@ -15,7 +15,7 @@ constexpr size_t kObjSize = 16;
 constexpr size_t kBatch = 512;
 constexpr size_t kQuotaCap = 4096;
 
-// Worst-case pop_range_tail traversal: a quota-full chain evicts one batch
+// Worst-case PopRangeTail traversal: a quota-full chain evicts one batch
 // from the tail and immediately re-inserts it at the head, so every
 // iteration repeats the same ~3584-step cut walk plus ~512-step suffix walk.
 void BM_FreeList_TrimTailWorst16B(benchmark::State& state) {
@@ -25,11 +25,11 @@ void BM_FreeList_TrimTailWorst16B(benchmark::State& state) {
     }
     FreeList list;
     // One full chain; each iteration trims the tail batch and pushes it back.
-    list.push_range(FreeChain{&blocks[0], &blocks[kQuotaCap - 1], kQuotaCap});
+    list.PushRange(FreeChain{&blocks[0], &blocks[kQuotaCap - 1], kQuotaCap});
     for (auto _: state) {
-        auto evicted = list.pop_range_tail(kBatch);
+        auto evicted = list.PopRangeTail(kBatch);
         benchmark::DoNotOptimize(evicted);
-        list.push_range(evicted);
+        list.PushRange(evicted);
     }
 }
 BENCHMARK(BM_FreeList_TrimTailWorst16B)->ThreadRange(1, 16);

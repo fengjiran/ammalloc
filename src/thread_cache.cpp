@@ -1,7 +1,7 @@
 /// @file thread_cache.cpp
 /// @brief ThreadCache slow-path implementation: refill, trim, and quota policy.
 ///
-/// The hot path is intentionally tiny: one TLS FreeList pop/push plus a quota
+/// The hot path is intentionally tiny: one TLS FreeList Pop()/Push() plus a quota
 /// check. More expensive policy decisions are deferred to the cold refill/trim
 /// helpers so the common case stays branch-light and lock-free.
 #include "ammalloc/thread_cache.h"
@@ -155,7 +155,7 @@ void ThreadCache::ReleaseAll() noexcept {
         auto& list = free_lists_[i];
         if (!list.empty()) {
             const auto size = SizeClass::Size(i);
-            const auto chain = list.pop_range(list.size());
+            const auto chain = list.PopRange(list.size());
 
             // Thread exit may occur in bursts. Preserve the ordinary bounded
             // reuse path instead of turning every TLS destructor into a hard
@@ -195,7 +195,7 @@ void ThreadCache::Trim(ThreadCacheTrimMode mode, size_t target_bytes) noexcept {
         }
 
         if (evict_count > 0) {
-            const auto chain = list.pop_range_tail(evict_count);
+            const auto chain = list.PopRangeTail(evict_count);
             const size_t evicted_bytes = chain.count * class_size;
             cached_bytes -= evicted_bytes;
             g_thread_cache_stats.trimmed_bytes.fetch_add(evicted_bytes,
@@ -247,7 +247,7 @@ void* ThreadCache::FetchFromCentralCache(size_t idx) noexcept {
     // A partial refill signals memory pressure: hold the quota and the decay
     // signal so pressure does not feed back into larger subsequent requests.
     if (fetched < fetch_num) {
-        return list.pop();
+        return list.Pop();
     }
 
     // Fresh allocation demand cancels any prior decay trend for this class.
@@ -259,7 +259,7 @@ void* ThreadCache::FetchFromCentralCache(size_t idx) noexcept {
     }
 
     list.set_overages(0);
-    return list.pop();
+    return list.Pop();
 }
 
 void ThreadCache::DeallocateSlowPath(size_t idx) noexcept {
@@ -279,7 +279,7 @@ void ThreadCache::DeallocateSlowPath(size_t idx) noexcept {
     // Return at most one batch per overflow event, evicting the oldest objects
     // first so recently freed ones stay local for reuse. This bounds slow-path
     // work and avoids draining the local cache completely on every trim.
-    if (const auto chain = list.pop_range_tail(batch_num); chain.head) {
+    if (const auto chain = list.PopRangeTail(batch_num); chain.head) {
         CentralCache::GetInstance().ReleaseListToSpans(chain.head, aligned_size);
     }
 
