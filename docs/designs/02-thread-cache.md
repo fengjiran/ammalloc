@@ -4,11 +4,11 @@
 
 ThreadCache 是分配器的前端缓存：每个线程一个 TLS 实例，处理绝大多数分配/释放请求。目标：
 
-- 快路径（一次 FreeList pop/push）完全无锁、无系统调用，单线程极速路径约 3.8 ns（见架构总览性能基线）。
+- 快路径（一次 FreeList Pop/Push）完全无锁、无系统调用，单线程极速路径约 3.8 ns（见架构总览性能基线）。
 
 - 通过慢启动与水位线动态调节每类配额，并以 aggregate quota-capacity budget 限制跨类总额，防止线程长期钉住突发期缓存。
 
-- 在不触碰常见 push/pop 路径的前提下，提供 owner-thread trim/purge 和 cooperative pressure request，使空 Span 最终能返回 PageCache。
+- 在不触碰常见 Push/Pop 路径的前提下，提供 owner-thread trim/purge 和 cooperative pressure request，使空 Span 最终能返回 PageCache。
 
 ## 2. 职责与边界
 
@@ -22,17 +22,17 @@ ThreadCache 是分配器的前端缓存：每个线程一个 TLS 实例，处理
 
 ## 3. 关键数据结构
 
-| 成员                                   | 含义                               | 同步机制 / 备注                                     | <br />                                                              |
-| ------------------------------------ | -------------------------------- | --------------------------------------------- | ------------------------------------------------------------------- |
-| `ThreadCache::free_lists_`           | 每个尺寸类别一个 LIFO FreeList           | TLS 私有，无同步；`alignas(64)` 防伪共享                 | <br />                                                              |
-| `FreeList::head_`                    | 嵌入式空闲链头（对象自身存 next）              | 仅所属线程读写                                       | <br />                                                              |
-| `FreeList::size_`                    | 当前对象数（size\_t）                   | 同上                                            | <br />                                                              |
-| `FreeList::max_size_`                | 该类高水位配额，初值 1                     | 慢启动增长 / 超配衰减                                  | <br />                                                              |
-| `FreeList::overages_`                | 连续溢出 trim 计数                     | 配额衰减信号                                        | <br />                                                              |
-| `ThreadCache::reserved_quota_bytes_` | `Σ(max_size × class_size)`       | 只在 quota 变更慢路径维护；是 capacity，不是当前 cached bytes | <br />                                                              |
-| `ThreadCache::cache_budget_bytes_`   | aggregate quota-capacity ceiling | 默认 2 MiB/thread；不在 push/pop 路径读取              | <br />                                                              |
-| `ThreadCache::observed_trim_epoch_`  | owner 已处理的 cooperative 请求        | 仅 refill/overflow/safepoint 读取全局 epoch        | <br />                                                              |
-| `ThreadCache::trim_request_`         | 全进程共享的收缩公告板：\`(epoch << 1)       | mode\`                                        | `inline static std::atomic<uint64_t>`；发布 release / 观察 acquire；快路径不读 |
+| 成员 | 含义 | 同步机制 / 备注 |
+| --- | --- | --- |
+| `ThreadCache::free_lists_` | 每个尺寸类别一个 LIFO FreeList | TLS 私有，无同步；`alignas(64)` 防伪共享 |
+| `FreeList::head_` | 嵌入式空闲链头（对象自身存 next） | 仅所属线程读写 |
+| `FreeList::size_` | 当前对象数（size\_t） | 同上 |
+| `FreeList::max_size_` | 该类高水位配额，初值 1 | 慢启动增长 / 超配衰减 |
+| `FreeList::overages_` | 连续溢出 trim 计数 | 配额衰减信号 |
+| `ThreadCache::reserved_quota_bytes_` | `Σ(max_size × class_size)` | 只在 quota 变更慢路径维护；是 capacity，不是当前 cached bytes |
+| `ThreadCache::cache_budget_bytes_` | aggregate quota-capacity ceiling | 默认 2 MiB/thread；不在 Push/Pop 路径读取 |
+| `ThreadCache::observed_trim_epoch_` | owner 已处理的 cooperative 请求 | 仅 refill/overflow/safepoint 读取全局 epoch |
+| `ThreadCache::trim_request_` | 全进程共享的收缩公告板：`(epoch << 1) | mode` | `inline static std::atomic<uint64_t>`；发布 release / 观察 acquire；快路径不读 |
 
 ## 4. 并发模型
 
@@ -42,7 +42,7 @@ ThreadCache 是分配器的前端缓存：每个线程一个 TLS 实例，处理
 
 - **无锁前提与代价**：快路径无锁依赖 TLS 私有实例（唯一 mutator 是拥有线程），避免共享 FreeList 的锁/原子/Cache line bouncing；代价是 TLS 访问本身（initial-exec 下为 FS 基址 + 偏移，成本远低于锁与原子竞争，背景见 [research/thread-local-and-thread-cache.md](research/thread-local-and-thread-cache.md)）。
 
-- **跨线程 free**：`Deallocate` 直接 push 到释放线程自己的 FreeList，不触碰分配线程缓存，快路径保持无锁；代价是缓存归属漂移（对象可能留在非分配线程），由 CentralCache 水位线与 trim 回收平衡（见 §6.3）。
+- **跨线程 free**：`Deallocate` 直接 Push 到释放线程自己的 FreeList，不触碰分配线程缓存，快路径保持无锁；代价是缓存归属漂移（对象可能留在非分配线程），由 CentralCache 水位线与 trim 回收平衡（见 §6.3）。
 
 - **析构顺序**：线程退出 → `ThreadCacheCleaner` 析构 → `ReleaseAll()` 归还 CentralCache → `SystemFree` 释放元数据页；`g_ThreadCacheAlreadyDestructed` 置位防止析构期递归重建。
 
@@ -52,7 +52,7 @@ ThreadCache 是分配器的前端缓存：每个线程一个 TLS 实例，处理
 
 | 接口                                               | 签名                                              | 语义要点                                                                                                            | Hot path |
 | ------------------------------------------------ | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | -------- |
-| `Allocate`                                       | `void* Allocate(size_t original_size) noexcept` | `@pre original_size <= MAX_TC_SIZE`；size=0 走最小类；快路径单次 pop，空列表走 `FetchFromCentralCache`                          | ✅        |
+| `Allocate`                                       | `void* Allocate(size_t original_size) noexcept` | `@pre original_size <= MAX_TC_SIZE`；size=0 走最小类；快路径单次 Pop，空列表走 `FetchFromCentralCache`                          | ✅        |
 | `Deallocate`                                     | `void Deallocate(void* ptr, size_t idx)`        | `@pre ptr != nullptr`；`@pre idx < kNumSizeClasses`；用 Span 记录的 `size_class_idx` 避免重新映射；超配额走 `DeallocateSlowPath` | ✅        |
 | `ReleaseAll`                                     | `void ReleaseAll()`                             | 清空所有 FreeList 归还 CentralCache；重置配额                                                                              | ❌        |
 | `Trim`                                           | `void Trim(ThreadCacheTrimMode, size_t)`        | owner-thread 固定 `kNumSizeClasses` 类（当前 40）扫描；soft 保留 warm batch，hard direct-release 到 Span bitmap               | ❌        |
@@ -130,16 +130,18 @@ return {current, overages + 1};                                             // �
 
 ### 6.3 Trim（DeallocateSlowPath，慢路径）
 
-- `Deallocate` 在 `size > max_size` 时进入；通过 `pop_range_tail` 从尾部（最旧）归还一个 batch 对象给 CentralCache（让最近释放的留在本地复用），
+- `Deallocate` 在 `size > max_size` 时进入；通过 `PopRangeTail` 从尾部（最旧）归还一个 batch 对象给 CentralCache（让最近释放的留在本地复用），
   避免一次清空本地缓存。
 
 - 归还对象后调用 `NextAfterOverflow` 更新配额与衰减计数（阈值与 floor 见 §6.1）。
 
+- `HandleGlobalTrimRequest`（§6.5）可能已收缩/抽干本类：进入慢路径后若 `size <= max_size`（cooperative trim 已把配额收缩到不低于当前驻留），直接返回，避免对低于配额的列表过度驱逐、并防止 `overages` 衰减计数被无谓累加。
+
 ### 6.4 Aggregate Budget 与显式 Trim
 
-- 默认 `cache_budget_bytes = 2 MiB`，约束 `Σ(max_size × class_size)`；它是 per-thread quota capacity 的上界，正常对象缓存至多比该配额多一个刚 push 的对象。全部类别单类封顶之和 ≈ 10.0 MiB，故多类同时热时该预算才是绑定约束（数值见 §6.7）。
+- 默认 `cache_budget_bytes = 2 MiB`，约束 `Σ(max_size × class_size)`；它是 per-thread quota capacity 的上界，正常对象缓存至多比该配额多一个刚 Push 的对象。全部类别单类封顶之和 ≈ 10.0 MiB，故多类同时热时该预算才是绑定约束（数值见 §6.7）。
 
-- 所有 aggregate accounting 仅发生在 refill、overflow quota decay、`Trim` 和`ReleaseAll`；常见 `Allocate` hit / `Deallocate` push 不读共享 atomic、不维护 exact cached bytes、也不做跨 `kNumSizeClasses` 类扫描。
+- 所有 aggregate accounting 仅发生在 refill、overflow quota decay、`Trim` 和`ReleaseAll`；常见 `Allocate` hit / `Deallocate` Push 不读共享 atomic、不维护 exact cached bytes、也不做跨 `kNumSizeClasses` 类扫描。
 
 - `Trim(kReuse, target)` 从大类向小类驱逐最旧对象，最多保留一个现有 batch/class，故在 warm floor 高于 target 时是 best-effort；`Trim(kRelease, 0)` 直接归还 bitmap 并重置全部 class quota 到 1。
 
@@ -165,7 +167,7 @@ epoch 不是时间戳，而是「第几代收缩请求」的**单调递增计数
 
 - **不丢新请求**：下一代（epoch+1）必与记录值不同，会被重新看到并执行；
 
-- **后来者补齐**：新线程以 0 起步，若全局已有请求（epoch>0），其首次慢路径即自动补办收缩，不会被落下。
+- **后来者对齐**：新线程在构造时即把 `observed_trim_epoch_` 对齐到公告板当前代际（构造函数读 `trim_request_` 的当前 epoch），只响应构造之后发布的新请求；构造前已发布的请求不再补办——避免新线程为旧请求无谓空跑一次全类 Trim。
 
 **发布端** **`RequestGlobalTrim(mode)`**
 
@@ -208,7 +210,7 @@ CAS 循环把公告板写为新值 `((observed >> 1) + 1) << 1 | mode`：
 
 1. **拉取式观察**：`trim_request_` 只在安全点被读取（`HandleGlobalTrimRequest` 挂在两个慢路径入口），而快路径刻意不读。idle 线程不执行任何分配器代码，永远到不了安全点——**没有代码在跑，就没有观察动作**。
 2. **无推送/中断通道**：ThreadCache 是线程私有无锁结构，唯一 mutator 是拥有线程；跨线程触碰他人 TLS 是设计红线。分配器也不具备向任意线程注入异步执行的手段，不存在「强制唤醒 idle 线程去 trim」的物理途径。
-3. **延迟 ≠ 丢失**：epoch 语义保证欠账补办——idle 线程下次首次分配必然走 `FetchFromCentralCache` 慢路径（FreeList 空），届时观察到 `epoch != observed_trim_epoch_`，补做一次 Trim。请求只是推迟到自然观察点，不会被吞掉。
+3. **延迟 ≠ 丢失（对新请求）**：epoch 语义保证新请求不丢——idle 线程下次首次分配必然走 `FetchFromCentralCache` 慢路径（FreeList 空），若构造后发布的新请求代际 `epoch > observed_trim_epoch_`，即在该自然观察点执行一次 Trim。构造前已发布的请求因构造时对齐不再补办（见上「后来者对齐」）；新请求只是推迟到自然观察点，不会被吞掉。
 4. **抢跑收缩是负收益**：即便技术上可行，立刻远程回收 idle 线程的缓存也不划算——唤醒需锁/原子握手，破坏快路径零共享写入的承诺；其缓存是停放状态、内存并未被他处使用，恢复运行时立刻要 refill 回来（先 trim 再取回是纯浪费）；且只有它自己 purge 后空 Span 回 PageCache，才算真正缓解 RSS。
 
 因此 §4 GC 边界才把 idle 线程的回收责任交给**上层 cooperative scheduler**：由它在**该线程自己的上下文**里周期性显式调用 `am_thread_cache_trim()` / `am_thread_cache_purge()`（设计好的 safepoint 出口），这是唯一能安全触达该类线程的方式。
@@ -217,12 +219,12 @@ CAS 循环把公告板写为新值 `((observed >> 1) + 1) << 1 | mode`：
 
 `Trim` 是「剪枝」操作：只剪掉暂闲的空闲对象与多余配额，绝不触碰正在使用的对象。一次调用同时做两件事：
 
-1. **对象层（驱逐 evict）**：先 `CachedBytesSnapshot()` 精确结算本线程当前驻留字节；`excess = cached_bytes − target_bytes`，然后**从大类到小类**扫描，每类按`ceil(excess / class_size)` 计算应驱逐数，`pop_range_tail` 从\*\*尾部（最旧）\*\*弹出对象并 `ReleaseListToSpans` 归还；每还一批递减 `cached_bytes`，excess 归零即停。
+1. **对象层（驱逐 evict）**：先 `CachedBytesSnapshot()` 精确结算本线程当前驻留字节；`excess = cached_bytes − target_bytes`，然后**从大类到小类**扫描，每类按`ceil(excess / class_size)` 计算应驱逐数，`PopRangeTail` 从**尾部（最旧）**弹出对象并 `ReleaseListToSpans` 归还；每还一批递减 `cached_bytes`，excess 归零即停。
 2. **配额层（收缩 contract）**：`SetQuota(idx, min(max_size, contracted))` 把突发期涨上去的配额回调（同步释放线程级预算预留），并清零 `overages` 衰减计数——**只降不升**。
 
 两种模式：
 
-| <br /> | `kReuse`（软收缩）                  | `kRelease`（硬收缩）                             |
+| 对比维度 | `kReuse`（软收缩）                  | `kRelease`（硬收缩）                             |
 | ------ | ------------------------------ | ------------------------------------------- |
 | 保留     | 每类最多 1 个**现有** batch 暖集（不主动建立） | 全部逐出                                        |
 | 对象去向   | `kTransferCache`（保留快速复用通道）     | `kSpanBitmap`（归位 bitmap，空 Span 回 PageCache） |
@@ -235,7 +237,7 @@ Trim 的三条硬性语义：
   
 - **不绕过预算闸**：收缩用 `min(current, contracted)`，即便处于「`Deallocate` 瞬时把链推到 `max_size + 1`」的状态，也不会把瞬态超限固化成配额增长。
   
-- **最旧优先**：`pop_range_tail` 保住最近释放对象的局部性，与溢出衰减同源（§6.3）。
+- **最旧优先**：`PopRangeTail` 保住最近释放对象的局部性，与溢出衰减同源（§6.3）。
 
 **遥测**
 
@@ -247,7 +249,7 @@ Trim 的三条硬性语义：
 
 - Refill 慢路径：O(batch)，取货量与 `FetchRange` 搬运均以 `batch` 为界。
 
-- **Trim 慢路径：O(`max_size`)，不是 O(1)。** `Deallocate` 先 `push` 再判 `size() > max_size()`，故进入时链深恰为 `max_size + 1`；`pop_range_tail(batch)` 归还的对象数受 `batch` 有界，但**定位驱逐点需要走完整条链**（≈ `size_ - 2` 步串行依赖 load），此外还要走完后缀求尾。"每事件 ≤ 1 batch" 只约束搬运对象数，不约束遍历代价。
+- **Trim 慢路径：O(`max_size`)，不是 O(1)。** `Deallocate` 先 `Push` 再判 `size() > max_size()`，故进入时链深恰为 `max_size + 1`；`PopRangeTail(batch)` 归还的对象数受 `batch` 有界，但**定位驱逐点需要走完整条链**（≈ `size_ - 2` 步串行依赖 load），此外还要走完后缀求尾。"每事件 ≤ 1 batch" 只约束搬运对象数，不约束遍历代价。
 
 - 上限由配额策略参数决定：`max_size ≤ kMaxQuotaBatches × batch`，故 16B/64B 类最坏单次 trim ≈ 4095 步（实测 ≈ 8.2 µs，摊销 ≈ 16 ns/free）。详见 [08-free-list.md](08-free-list.md) §6.6。
 
@@ -269,7 +271,7 @@ ThreadCache 的容量限制不是一段独立的策略代码，而是**五道分
 | ------- | ------------------ | ------------------------------------------------------- | -------------------------------------------------------- | ------------------------- | ------------ |
 | L0 入口尺寸 | 哪些对象能进 ThreadCache | `SizeConfig::MAX_TC_SIZE` = 32 KiB                      | `am_malloc_slow_path`：更大请求直连 `PageCache::AllocSpan`      | 一次 `>` 比较                 | §1、§5        |
 | L1 单类配额 | 每个尺寸类可驻留的**对象个数**  | `max_size ≤ kMaxQuotaBatches × batch`                   | 满额 refill 涨、部分 refill 保持、连续溢出衰减                          | 冷路径纯函数                    | §6.1、§6.2    |
-| L2 溢出即裁 | 超出配额的驻留部分          | 每事件至多归还 1 个 batch                                       | 每次 `Deallocate` push 后判 `size() > max_size()`            | 快路径一次比较；慢路径 O(`max_size`) | §6.3、§6.6    |
+| L2 溢出即裁 | 超出配额的驻留部分          | 每事件至多归还 1 个 batch                                       | 每次 `Deallocate` Push 后判 `size() > max_size()`            | 快路径一次比较；慢路径 O(`max_size`) | §6.3、§6.6    |
 | L3 聚合预算 | 跨类**总配额容量**        | `cache_budget_bytes_` = 2 MiB/thread，`CanSetQuota` 逐一否决 | 每次配额增长前                                                  | 慢路径 `Σ` 增量记账              | §6.4         |
 | L4 主动收敛 | 已驻留对象 + 配额本身       | `kReuse` → 1 MiB 软目标；`kRelease` → 0 字节                  | owner `Trim`/`purge`、cooperative epoch、线程退出 `ReleaseAll` | 固定 `kNumSizeClasses` 类扫描  | §4、§6.4、§6.5 |
 
@@ -285,7 +287,7 @@ ThreadCache 的容量限制不是一段独立的策略代码，而是**五道分
 **常驻不变量**
 
 - 每类：`1 ≤ max_size_ ≤ kMaxQuotaBatches × batch`，且瞬时 `size_ ≤ max_size_ + 1`
-  （`Deallocate` 先 push 后判；`FreeList::set_max_size` 把下限钳到 1，0 配额会让 refill 永久失败）。
+  （`Deallocate` 先 Push 后判；`FreeList::set_max_size` 把下限钳到 1，0 配额会让 refill 永久失败）。
 
 - 取回量：`fetch_num = min(batch, max_size_)`，refill 不会把列表填到配额以上。
 
@@ -376,9 +378,9 @@ ThreadCache 的容量限制不是一段独立的策略代码，而是**五道分
 2. **2 MiB aggregate budget 必然成为绑定约束**：`kNumSizeClasses` 类字节上限之和 ≈ 10.0 MiB，远大于单线程
    2 MiB 总额。任一类别单独热起可在 1840.25 KiB 余量内触顶，但多类同时热时后续增长被
    `CanSetQuota` 拒绝并累加 `budget_denied_growth`（见 §6.4）。
-3. **实际驻留对象数比「对象上限」多 1**：`Deallocate` 先 `push` 后判 `size() > max_size()`，
+3. **实际驻留对象数比「对象上限」多 1**：`Deallocate` 先 `Push` 后判 `size() > max_size()`，
    故瞬时 `size_ ≤ max_size_ + 1`；refill 侧 `fetch_num = min(batch, max_size)` 不再额外扩张
-   （见 §6.2）。这也是 §6.6 中 `pop_range_tail` 遍历长度为 `max_size + 1` 的来源。
+   （见 §6.2）。这也是 §6.6 中 `PopRangeTail` 遍历长度为 `max_size + 1` 的来源。
 
 ## 7. 边界条件与错误处理
 
@@ -413,13 +415,15 @@ ThreadCache 的容量限制不是一段独立的策略代码，而是**五道分
 - 并发：`MultiThreadStress`、`MultiThreadedAllocation`、`MultiThreadedDifferentSizes`
 
 - retention：`AggregateQuotaBudgetBoundsAllSizeClasses`、`QuotaReservationTracksGrowthAndHardTrim`、
-  `SoftTrimKeepsOneBatchAndRetractsBurstQuota`、`CooperativeHardTrimIsObservedOnlyAtSlowPath`
+  `SoftTrimKeepsOneBatchAndRetractsBurstQuota`、`CooperativeHardTrimIsObservedOnlyAtSlowPath`、
+  `CooperativeSoftTrimCannotGrowQuotaPastBudget`（cooperative soft trim 不绕过预算闸）、
+  `ExplicitOwnerPurgeDrainsCurrentThreadAndTransferCache`（显式 purge 驱逐本线程并 drain TransferCache）
 
 `tests/unit/test_ammalloc.cpp`：
 
 - TLS 生命周期：`AmMallocThreadExitTest.ThreadExitDrainsCacheToCentralCache`（线程退出经 `ThreadCacheCleaner → ReleaseAll → ReleaseThreadCache` 归还对象并释放元数据页）
 
-- 跨线程 free：`AmMallocCrossThreadFreeTest.FreeOnDifferentThread`（释放线程重读 `span->size_class_idx` 并 push 到自身 FreeList，覆盖 `am_free_slow_path → CreateThreadCache` 与归属漂移）
+- 跨线程 free：`AmMallocCrossThreadFreeTest.FreeOnDifferentThread`（释放线程重读 `span->size_class_idx` 并 Push 到自身 FreeList，覆盖 `am_free_slow_path → CreateThreadCache` 与归属漂移）
 
 `tests/unit/test_quota_policy.cpp`：`quota_policy` 纯函数（`NextAfterRefill`/`NextAfterOverflow`）的增长/衰减分支与封顶/floor 边界。
 
