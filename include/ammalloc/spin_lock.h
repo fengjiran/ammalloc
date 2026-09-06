@@ -15,9 +15,9 @@ namespace ammalloc {
 /// @brief Provides TTAS mutual exclusion for short, non-blocking critical sections.
 ///
 /// Contended waiters use relaxed reads and architecture pause hints before
-/// attempting an acquire exchange, reducing cache-line bouncing. Prolonged
-/// contention periodically yields the current time slice. The lock is neither
-/// fair nor recursive and must not protect operations that sleep or block.
+/// attempting an acquire test-and-set, reducing cache-line bouncing. Prolonged
+/// contention periodically offers the scheduler a chance to reschedule. The lock
+/// is neither fair nor recursive and must not protect operations that sleep or block.
 class SpinLock {
 public:
     /// @brief Default-constructs an unlocked SpinLock.
@@ -31,9 +31,9 @@ public:
     void lock() noexcept {
         size_t spin_cnt = 0;
         while (true) {
-            // Delay the cache-line-invalidating exchange until the lock appears free.
-            if (!locked_.load(std::memory_order_relaxed)) {
-                if (!locked_.exchange(true, std::memory_order_acquire)) {
+            // Delay the cache-line-invalidating RMW until the lock appears free.
+            if (!locked_.test(std::memory_order_relaxed)) {
+                if (!locked_.test_and_set(std::memory_order_acquire)) {
                     return;
                 }
             }
@@ -53,17 +53,19 @@ public:
     /// @brief Attempts to acquire the lock without waiting.
     /// @return True when the lock was acquired; false otherwise.
     bool try_lock() noexcept {
-        return !locked_.load(std::memory_order_relaxed) && !locked_.exchange(true, std::memory_order_acquire);
+        return !locked_.test(std::memory_order_relaxed) &&
+               !locked_.test_and_set(std::memory_order_acquire);
     }
 
     /// @brief Releases the lock with release ordering.
     /// @pre The calling thread owns the lock.
     void unlock() noexcept {
-        locked_.store(false, std::memory_order_release);
+        locked_.clear(std::memory_order_release);
     }
 
 private:
-    std::atomic<bool> locked_{false};
+    // C++20 initializes the flag to clear and guarantees lock-free atomic operations.
+    std::atomic_flag locked_{};
 };
 
 }// namespace ammalloc

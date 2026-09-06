@@ -7,9 +7,15 @@
 #include "ammalloc/attributes.h"
 #include "ammalloc/config.h"
 
+#include <atomic>
 #include <bit>
 #include <cstdint>
+
+#if defined(_MSC_VER) && defined(_M_ARM64)
+#include <intrin.h>
+#elif defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
+#endif
 
 namespace ammalloc::detail {
 
@@ -58,14 +64,18 @@ AM_NODISCARD inline void* PageIDToPtr(size_t page_idx) noexcept {
     }
 }
 
-/// @brief Issues an architecture-appropriate pause hint while spinning.
+/// @brief Issues a best-effort CPU hint while spinning.
+/// @note Provides no inter-thread synchronization, scheduling, or delay guarantee.
+///       Unsupported targets use only a compiler fence, without a hardware pause.
 inline void CPUPause() noexcept {
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(_MSC_VER) && defined(_M_ARM64)
+    __yield();
+#elif defined(__x86_64__) || defined(_M_X64)
     _mm_pause();
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    __asm__ volatile("yield" ::: "memory");
+#elif defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    __asm__ volatile("yield" : :);
 #else
-    // Preserve a compiler-visible wait point on unsupported architectures.
+    // Compiler ordering only; this does not issue a CPU pause or yield to the OS.
     std::atomic_signal_fence(std::memory_order_seq_cst);
 #endif
 }
@@ -83,8 +93,6 @@ size_t ParseSize(const char* str);
 ///         false for null and all other values.
 bool ParseBool(const char* str);
 
-} // namespace ammalloc::detail
-
-
+}// namespace ammalloc::detail
 
 #endif// AMMALLOC_COMMON_H
