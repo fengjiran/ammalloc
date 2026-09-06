@@ -23,8 +23,8 @@ namespace ammalloc {
 /// Direct bitmap release is used by owner-thread RSS trims and by bounded
 /// TransferCache drains; ordinary overflow continues to prefer reuse.
 enum class CentralReleaseMode : uint8_t {
-    kTransferCache, ///< Return objects through the shared TransferCache bucket.
-    kSpanBitmap,    ///< Bypass TransferCache; release directly to Span bitmaps.
+    kTransferCache,///< Return objects through the shared TransferCache bucket.
+    kSpanBitmap    ///< Bypass TransferCache; release directly to Span bitmaps.
 };
 
 /// @brief Slow-path-only CentralCache retention telemetry.
@@ -56,7 +56,7 @@ class CentralCache {
         /// Spin lock protecting `transfer_cache` and its count.
         SpinLock transfer_cache_lock;
         /// Number of valid pointers currently stored in `transfer_cache`.
-        size_t transfer_cache_count{0};
+        size_t transfer_cache_size{0};
         /// Physical slot of the cold end in the circular pointer array.
         /// Together with count this preserves LIFO reuse without moving a hot
         /// suffix while a drain holds the SpinLock.
@@ -99,15 +99,15 @@ public:
     CentralCache& operator=(const CentralCache&) = delete;
 
     /// @brief Fetches a batch of objects to refill a ThreadCache.
-    /// @param block_list Destination list that receives fetched objects.
-    /// @param batch_num Maximum number of objects to fetch.
+    /// @param free_list Destination list that receives fetched objects.
+    /// @param fetch_num Maximum number of objects to fetch.
     /// @param aligned_size Size-class-aligned object size used to select the bucket.
     /// @return Number of fetched objects, which may be smaller on allocation failure.
     /// @pre `batch_num <= SizeClass::kMaxBatchSize`.
     /// @pre `aligned_size` is an exact size-class boundary
     ///      (`SizeClass::Size(SizeClass::Index(aligned_size)) == aligned_size`);
     ///      Span::Init aborts otherwise in every build.
-    size_t FetchRange(FreeList& block_list, size_t batch_num, size_t aligned_size) noexcept;
+    size_t FetchRange(FreeList& free_list, size_t fetch_num, size_t aligned_size) noexcept;
 
     /// @brief Returns an intrusive object chain to the matching shared bucket.
     /// @param start Head of a non-empty chain of objects from one size class.
@@ -146,7 +146,7 @@ private:
     CentralCache() noexcept {
         // A failed backing allocation leaves all capacities at zero. Fetch and
         // release then use the SpanList path without retrying on every request.
-        static_cast<void>(TryInitTransferCache());
+        UNUSED(TryInitTransferCache());
     }
 
     /// @brief (Re)allocates TransferCache backing without aborting.
@@ -193,4 +193,4 @@ private:
 
 }// namespace ammalloc
 
-#endif // AMMALLOC_CENTRAL_CACHE_H
+#endif// AMMALLOC_CENTRAL_CACHE_H

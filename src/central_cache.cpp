@@ -15,16 +15,16 @@ namespace ammalloc {
 std::atomic<size_t> g_mock_fetch_range_cap{0};
 #endif
 
-size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num,
+size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
                                 size_t aligned_size) noexcept {
-    AM_DCHECK(batch_num <= SizeClass::kMaxBatchSize);
+    AM_DCHECK(fetch_num <= SizeClass::kMaxBatchSize);
 #ifdef AMMALLOC_TEST
     if (const size_t cap = g_mock_fetch_range_cap.load(std::memory_order_relaxed);
-        cap > 0 && cap < batch_num) {
-        batch_num = cap;
+        cap > 0 && cap < fetch_num) {
+        fetch_num = cap;
     }
 #endif
-    auto idx = SizeClass::Index(aligned_size);
+    const auto idx = SizeClass::Index(aligned_size);
     auto& bucket = buckets_[idx];
 
     void* local_ptrs[SizeClass::kMaxBatchSize];
@@ -32,9 +32,9 @@ size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num,
 
     // Probe the O(1) TransferCache before taking the SpanList mutex.
     bucket.transfer_cache_lock.lock();
-    size_t grab_count = std::min(batch_num, bucket.transfer_cache_count);
+    size_t grab_count = std::min(fetch_num, bucket.transfer_cache_size);
     for (size_t i = 0; i < grab_count; ++i) {
-        const size_t logical_index = --bucket.transfer_cache_count;
+        const size_t logical_index = --bucket.transfer_cache_size;
         local_ptrs[i] = bucket.transfer_cache[TransferIndex(bucket, logical_index)];
     }
     bucket.transfer_cache_lock.unlock();
@@ -52,12 +52,12 @@ size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num,
         head = node;
     }
 
-    if (fetched < batch_num) {
-        size_t need_for_thread = batch_num - fetched;
+    if (fetched < fetch_num) {
+        size_t need_for_thread = fetch_num - fetched;
         // Prefetch one additional batch to amortize the SpanList lock for the
         // next requester.
         // TODO(owner): Bound prefetching by the observed TransferCache capacity.
-        const size_t extract_target = need_for_thread + batch_num;
+        const size_t extract_target = need_for_thread + fetch_num;
         void* prefetch_ptrs[SizeClass::kMaxBatchSize];
         size_t actual_prefetched = 0;
         size_t extracted = 0;
@@ -106,8 +106,8 @@ size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num,
             size_t successfully_pushed = 0;
             bucket.transfer_cache_lock.lock();
             while (successfully_pushed < actual_prefetched &&
-                   bucket.transfer_cache_count < bucket.transfer_cache_capacity) {
-                const size_t slot = TransferIndex(bucket, bucket.transfer_cache_count++);
+                   bucket.transfer_cache_size < bucket.transfer_cache_capacity) {
+                const size_t slot = TransferIndex(bucket, bucket.transfer_cache_size++);
                 bucket.transfer_cache[slot] =
                         prefetch_ptrs[successfully_pushed++];
             }
@@ -132,7 +132,7 @@ size_t CentralCache::FetchRange(FreeList& block_list, size_t batch_num,
     if (fetched > 0) {
         // `fetched` is the node count of the head/tail chain built above;
         // PushRange trusts `count` (debug-verified), so keep them in lockstep.
-        block_list.PushRange(FreeChain{head, tail, fetched});
+        free_list.PushRange(FreeChain{head, tail, fetched});
     }
     return fetched;
 }
@@ -145,7 +145,7 @@ size_t CentralCache::GetTransferCacheCountForTest(size_t idx) noexcept {
     AM_DCHECK(idx < SizeClass::kNumSizeClasses);
     auto& bucket = buckets_[idx];
     bucket.transfer_cache_lock.lock();
-    const size_t count = bucket.transfer_cache_count;
+    const size_t count = bucket.transfer_cache_size;
     bucket.transfer_cache_lock.unlock();
     return count;
 }
@@ -171,8 +171,8 @@ void CentralCache::ReleaseListToSpans(void* start, size_t aligned_size,
             // this tier so no empty Span remains pinned by CentralCache.
             bucket.transfer_cache_lock.lock();
             while (pushed < local_count &&
-                   bucket.transfer_cache_count < bucket.transfer_cache_capacity) {
-                const size_t slot = TransferIndex(bucket, bucket.transfer_cache_count++);
+                   bucket.transfer_cache_size < bucket.transfer_cache_capacity) {
+                const size_t slot = TransferIndex(bucket, bucket.transfer_cache_size++);
                 bucket.transfer_cache[slot] = local_ptrs[pushed++];
             }
             bucket.transfer_cache_lock.unlock();
@@ -248,8 +248,8 @@ size_t CentralCache::DrainTransferCaches(size_t max_bytes) noexcept {
         // forever; a later pressure request handles newly retained objects.
         bucket.transfer_cache_lock.lock();
         const size_t byte_limited_count = unbounded
-                                                  ? bucket.transfer_cache_count
-                                                  : std::min(bucket.transfer_cache_count, max_bytes / aligned_size);
+                                                  ? bucket.transfer_cache_size
+                                                  : std::min(bucket.transfer_cache_size, max_bytes / aligned_size);
         bucket.transfer_cache_lock.unlock();
 
         size_t remaining_from_snapshot = byte_limited_count;
@@ -260,7 +260,7 @@ size_t CentralCache::DrainTransferCaches(size_t max_bytes) noexcept {
             void* local_ptrs[SizeClass::kMaxBatchSize];
             bucket.transfer_cache_lock.lock();
             const size_t detached = std::min(batch_limit,
-                                             bucket.transfer_cache_count);
+                                             bucket.transfer_cache_size);
             if (detached == 0) {
                 bucket.transfer_cache_lock.unlock();
                 break;
@@ -275,7 +275,7 @@ size_t CentralCache::DrainTransferCaches(size_t max_bytes) noexcept {
             bucket.transfer_cache_begin = detached == bucket.transfer_cache_capacity
                                                   ? 0
                                                   : TransferIndex(bucket, detached);
-            bucket.transfer_cache_count -= detached;
+            bucket.transfer_cache_size -= detached;
             bucket.transfer_cache_lock.unlock();
 
             void* head = nullptr;
@@ -309,12 +309,12 @@ void CentralCache::Reset() noexcept {
         auto& bucket = buckets_[i];
         void* head = nullptr;
         bucket.transfer_cache_lock.lock();
-        for (size_t j = 0; j < bucket.transfer_cache_count; ++j) {
+        for (size_t j = 0; j < bucket.transfer_cache_size; ++j) {
             void* obj = bucket.transfer_cache[TransferIndex(bucket, j)];
             static_cast<FreeBlock*>(obj)->next = static_cast<FreeBlock*>(head);
             head = obj;
         }
-        bucket.transfer_cache_count = 0;
+        bucket.transfer_cache_size = 0;
         bucket.transfer_cache_begin = 0;
         bucket.transfer_cache_lock.unlock();
 
@@ -360,7 +360,7 @@ void CentralCache::Reset() noexcept {
             auto& bucket = buckets_[i];
             bucket.transfer_cache = nullptr;
             bucket.transfer_cache_capacity = 0;
-            bucket.transfer_cache_count = 0;
+            bucket.transfer_cache_size = 0;
             bucket.transfer_cache_begin = 0;
         }
     }
