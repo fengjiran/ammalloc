@@ -651,13 +651,13 @@ else {
 
 ```cpp
 class SpinLock {
-    std::atomic<bool> locked_{false};
+    std::atomic_flag locked_{};
 
     void lock() noexcept {
         size_t spin_cnt = 0;
         while (true) {
-            if (!locked_.load(std::memory_order_relaxed)) {   // Phase 1: 乐观读
-                if (!locked_.exchange(true, std::memory_order_acquire)) {
+            if (!locked_.test(std::memory_order_relaxed)) {   // Phase 1: 乐观读
+                if (!locked_.test_and_set(std::memory_order_acquire)) {
                     return;                                    // Phase 2: 抢占成功
                 }
             }
@@ -669,27 +669,32 @@ class SpinLock {
             }
         }
     }
-    bool try_lock() noexcept { /* 乐观读 + acquire exchange，不等待 */ }
-    void unlock() noexcept { locked_.store(false, std::memory_order_release); }
+    bool try_lock() noexcept {
+        return !locked_.test(std::memory_order_relaxed) &&
+               !locked_.test_and_set(std::memory_order_acquire);
+    }
+    void unlock() noexcept { locked_.clear(std::memory_order_release); }
 };
 ```
+
+C++20 的 `std::atomic_flag` 默认初始化为 clear，其 test/test-and-set/clear 原子操作保证 lock-free；SpinLock 本身仍是依赖持有者释放的阻塞型同步算法，不保证公平或无饥饿。成功的 acquire test-and-set 与前任持有者的 release clear 建立临界区同步；relaxed test 仅用于探测。
 
 #### 5.5.2 性能优化点
 
 | 优化技术                                         | 作用                |
 | -------------------------------------------- | ----------------- |
-| Relaxed 读                                    | 避免缓存行失效时的总线风暴     |
+| Relaxed 读                                    | 预读减少无效 RMW 及缓存一致性流量     |
 | CPU Pause（x86 `_mm_pause` / aarch64 `yield`） | 提示 CPU 处于自旋，优化流水线 |
-| 自适应退避                                        | 长时间等待让出时间片，避免饥饿   |
+| 固定周期 pause + yield                                        | 每 2001 次等待尝试让出 CPU，不保证公平或无饥饿   |
 | Acquire/Release 语义                           | 建立临界区内存边界         |
 
 #### 5.5.3 与 std::mutex 对比
 
 | 特性    | SpinLock      | std::mutex              |
 | ----- | ------------- | ----------------------- |
-| 适用场景  | 短临界区（< 100ns） | 长临界区                    |
-| 等待策略  | 忙等待           | 内核调度                    |
-| 上下文切换 | 无             | 有                       |
+| 适用场景  | 经测量足够短且不主动阻塞的临界区 | 长临界区                    |
+| 等待策略  | 忙等待，周期性 yield | 实现相关，可包含自旋与阻塞等待 |
+| 上下文切换 | yield 或被抢占时可能发生 | 发生阻塞等待时可能发生 |
 | 适用层级  | TransferCache | SpanList、PageCacheShard |
 
 ### 5.6 PageMap（页映射基数树）
@@ -1147,4 +1152,3 @@ ammalloc/
 | v2.0   | 2026-08-19 | AetherMind Team | 全量对齐当前实现：分片 PageCache、四层 PageMap（48/57-bit）、Span 64B 布局、ObjectPool、PageAllocator 2MiB 缓存、PageHeapScavenger；更新 SizeClass 映射/碎片率/对齐契约、配置参数、性能基线；清理重复图表；新增"演进方向"章链接改进计划 |
 | v2.0.1 | 2026-08-19 | AetherMind Team | §5.4 对齐 `01-size-class.md` v2.3：阶梯映射设计依据修正为 jemalloc 风格；线性区 \[1,128] 均匀分布累计碎片修正为 ≈10.4%；增加指向子文档的链接                                                                   |
 | v2.0.2 | 2026-08-19 | AetherMind Team | `FreeList`/`FreeBlock` 从 central\_cache.h 迁出至独立头文件 `free_list.h`（上层头文件不再依赖中端头文件）；附录 A 文件结构同步                                                                         |
-
