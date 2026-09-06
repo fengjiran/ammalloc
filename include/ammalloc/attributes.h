@@ -79,4 +79,10 @@
 #define AM_ALWAYS_INLINE inline
 #endif
 
-#endif // AMMALLOC_ATTRIBUTES_H
+#define UNUSED(expr)   \
+    do {               \
+        (void) (expr); \
+    } while (false)
+
+
+#endif// AMMALLOC_ATTRIBUTES_H
