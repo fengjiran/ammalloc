@@ -148,9 +148,9 @@ BENCHMARK_TEMPLATE(BM_Malloc_Churn, 8, 256, std::malloc, std::free);
 BENCHMARK_TEMPLATE(BM_Malloc_Churn, 64, 256, am_malloc, am_free);
 BENCHMARK_TEMPLATE(BM_Malloc_Churn, 64, 256, std::malloc, std::free);
 
-// 3. System-wide churn (Window = 1024).
-// Forces ThreadCache overflow, exercising CentralCache bucket locks and batch
-// transfers.
+// 3. Larger live window (Window = 1024). After filling the window, each
+// iteration allocates and frees one object; live objects are not cached free
+// objects, so this does not guarantee steady-state CentralCache traffic.
 BENCHMARK_TEMPLATE(BM_Malloc_Churn, 8, 1024, am_malloc, am_free);
 BENCHMARK_TEMPLATE(BM_Malloc_Churn, 8, 1024, std::malloc, std::free);
 
@@ -160,8 +160,9 @@ BENCHMARK_TEMPLATE(BM_Malloc_Churn, 4096, 1024, std::malloc, std::free);
 BENCHMARK(BM_am_malloc_free_pair_random_size);
 BENCHMARK(BM_std_malloc_free_pair_random_size);
 
-// Registered test: BatchSize 2000 far exceeds ThreadCache's max_size (512),
-// so this always hits the CentralCache slow path.
+// Bulk allocation/release includes quota warmup. The current quota can grow
+// beyond 2000 objects for this class, so this is an end-to-end workload rather
+// than an isolated or guaranteed steady-state CentralCache slow path.
 BENCHMARK_TEMPLATE(BM_Malloc_Deep_Churn, 8, 2000, am_malloc, am_free);
 BENCHMARK_TEMPLATE(BM_Malloc_Deep_Churn, 8, 2000, std::malloc, std::free);
 
