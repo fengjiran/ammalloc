@@ -32,7 +32,7 @@ Span 描述一段连续页区间及其对象分配状态，是 PageCache 切分/
 | `Span::flags` | `kUsedMask`/`kCommittedMask` 打包位 | 经 `IsUsed/SetUsed/IsCommitted/SetCommitted` 访问 |
 | `Span::size_class_idx` | CentralCache 桶索引 | 释放时避免重映射尺寸 |
 | `Span::aligned_obj_size/capacity` | 对象尺寸 / 最大槽数 | CentralCache 桶锁下访问 |
-| `Span::use_count` | 不在 Span bitmap 中的对象数（含用户持有、ThreadCache/TransferCache/临时批次） | 仅随 bitmap 位变化；`== 0` 表示无任何缓存持有对象，是返还 PageCache 的所有权门禁 |
+| `Span::use_count` | 不在 Span bitmap 中的对象数（含用户持有、ThreadCache/TransferCache/临时批次） | 仅随 bitmap 位变化；`== 0` 表示无任何缓存持有对象，是返还 PageCache 的所有权门禁；满判定经 `IsFull()`（`use_count >= capacity`）单源表达 |
 | `Span::scan_cursor` | 首个可能含空闲位的 bitmap 字 | 减少分配扫描范围 |
 | `Span::obj_offset/owner_shard_id` | 数据区偏移 / 属主分片 | 初始化后不可变 |
 | `Span::last_used_time_ms` | 最近归还时间戳（冷数据） | Scavenger 读取 |
@@ -50,6 +50,7 @@ Span 描述一段连续页区间及其对象分配状态，是 PageCache 切分/
 | 接口 | 签名 | 语义要点 | Hot path |
 |---|---|---|---|
 | `Span::Init` | `void Init(size_t aligned_object_size)` | `@pre` Span 归当前 CentralCache 桶独占；`aligned_object_size` 必须是精确类别边界（`Size(Index(s)) == s` 且 ≤ MAX_TC_SIZE），违反即 `AM_CHECK` 在所有构建 abort；计算 bitmap+数据布局并置位空闲 bitmap | ❌ |
+| `ComputeSpanLayout` | `constexpr SpanLayout (size_t obj_size, size_t pages) noexcept` | `Span::Init` 布局数学的单一来源（bitmap 字数 / `obj_offset` / `capacity`）；零 `capacity` 由 §7 的编译期不变量在每个 size class 上排除 | ❌ |
 | `Span::AllocObject` | `void* AllocObject()` | 清一个空闲位；满时返回 null；`scan_cursor` 推进 | ✅ |
 | `Span::FreeObject` | `void FreeObject(void* ptr)` | 置回空闲位；`AM_DCHECK` 检出 double-free；回退 `scan_cursor` | ✅ |
 | `SpanList::insert/erase/push_front/push_back/pop_front` | 静态/成员 | 循环哨兵免空分支；不持有元数据 | ✅ |
@@ -71,6 +72,7 @@ bitmap 放页区起始（1 bit/对象），数据区按 ALIGNMENT 对齐其后�
 - 创建期不变式（`AM_CHECK`，所有构建生效）：`0 < obj_size ≤ MAX_TC_SIZE` 且 `Size(Index(obj_size)) == obj_size`；非边界尺寸在雕刻对象网格之前即 abort，杜绝释放期槽位计算与桶索引不一致的静默错类复用。free 侧另有 `AM_HCHECK` 交叉校验（debug / `AM_HARDENED`）比对 `size_class_idx` 与 `aligned_obj_size`，把创建后元数据损坏转为确定性 abort。
 - bitmap 字几何常量统一取自 `SystemConfig::BITMAP_BITS/SHIFT/MASK` 与 `BITS_PER_BYTE`（config.h，分别派生自 `std::countr_zero` 与 `std::numeric_limits<unsigned char>::digits`），代码中不出现 64/63/6/8 字面量；字数按 `(max_objs + BITMAP_MASK) >> BITMAP_SHIFT` 取整。
 - 不存数据指针，`obj_offset` 派生存取，保证 Span 保持 64B。
+- 上述布局数学由 `ComputeSpanLayout`（span.h）单源实现：`Span::Init` 与 §7 的编译期不变量共用同一函数，避免两处近似公式各自漂移；`obj_offset` 以页基偏移表达，依赖页基满足 `ALIGNMENT` 对齐。
 
 ### 6.2 AllocObject / FreeObject
 
@@ -96,7 +98,8 @@ i1/i2/i3 各取 9 bit；逐层 acquire load，任一空层返回 null。
 - `page_id` 越界（`i0 >= RADIX_ROOT_SIZE`）→ `GetSpan` 返回 null（对未知地址的释放被 `am_free` 忽略）。
 - radix metadata OOM → `EnsureRange` 返回 false；PageCache 在 leaf publication 前回收新 Span metadata 与 system mapping，向上返回 `nullptr`。
 - `FreeObject` 越界/错位指针：`AM_HCHECK` 下溢、对齐与溢出检查（debug 构建及 `AM_HARDENED` release 崩溃，其余 release 交由调用契约）。
-- `Init` 时容量为 0（对齐开销超过页区）：`AllocObject` 恒 null，该 Span 不被分配使用。
+- `Init` 拒绝容量为 0、bitmap 覆盖不足或数据区越界的布局，并通过所有构建生效的 `AM_CHECK` fail-fast；非标准内部调用不能把畸形 small-object Span 发布给 CentralCache。
+- 编译期不变量（`span.cpp`，对全部 size class 求值）：`capacity >= 1`（每 Span 至少容纳 1 个对象）与 `bitmap_num × BITMAP_BITS >= capacity`（bitmap 字数覆盖全部槽位）。下调 `MAX_PAGE_NUM`、改动页数/批表或对齐参数时在编译期失败，而非运行期静默退化（零容量 Span 膨胀 / 未初始化 bitmap 读取）。`ComputeSpanLayout` 还将最终 capacity 限制在 bitmap 初始估算范围内，使“页区只够对象、不够 bitmap”的边界返回零容量自洽布局。
 
 ## 8. 风险与权衡
 
@@ -116,3 +119,5 @@ i1/i2/i3 各取 9 bit；逐层 acquire load，任一空层返回 null。
 | 2026-08-19 | 初版（由架构总览 §4/§5.3/§5.6 拆分扩展） | 文档系统落地 | — |
 | 2026-08-26 | 明确 `use_count` 为 bitmap 外对象数及归还门禁语义 | span.h 注释与 improvement-plan 04 语义对齐 | — |
 | 2026-08-28 | PageMap 拆分 `EnsureRange` 与 no-throw `SetSpan`，structural growth 独立同步 | metadata OOM 不再在 `noexcept` 边界 terminate，禁止 partial leaf publication | S-2 |
+| 2026-09-14 | 新增 `Span::IsFull()` 收敛 full 判定（`AllocObject`、`FetchRange` 旋转检查共用） | 消除三处重复的 `use_count >= capacity` | — |
+| 2026-09-14 | 提取自洽的 `ComputeSpanLayout`（`Span::Init` 布局单源）+ 两条全类编译期断言（`capacity ≥ 1`、bitmap 覆盖）+ `Init` 运行时 fail-fast | M3 加固：排除零容量 Span 的 Span 膨胀/假 OOM 与 bitmap 未初始化读取 | — |

@@ -31,7 +31,7 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 | 成员 | 含义 | 同步机制 / 备注 |
 |---|---|---|
 | `Bucket::transfer_cache` | 该类的指针数组（借自全局连续映射） | `SpinLock`（`transfer_cache_lock`）保护 |
-| `Bucket::transfer_cache_count/capacity` | 有效指针数 / 容量 | 同上 |
+| `Bucket::transfer_cache_size/begin/capacity` | 有效指针数 / 圆环冷端槽位 / 容量 | `SpinLock`（`transfer_cache_lock`）保护；`begin` 支持免移动热后缀的冷端 drain |
 | `Bucket::span_list` | 该类可分配 Span 的借用链表 | `std::mutex`（`span_list_lock`）保护；与 TransferCache 域分处不同缓存行 |
 | `FreeBlock` | 空闲对象体内的侵入式 next 指针 | 无额外分配 |
 | `Bucket` | 每尺寸类别一个桶 | `alignas(64)`；三缓存行分区，双锁与相邻桶均不共享缓存行（见 §3.1） |
@@ -67,19 +67,23 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 | 接口 | 签名 | 语义要点 | Hot path |
 |---|---|---|---|
 | `FetchRange` | `size_t FetchRange(FreeList&, size_t batch_num, size_t aligned_size) noexcept` | `@pre batch_num <= kMaxBatchSize`；先 TransferCache 后 SpanList；返回可能小于请求（OOM 或 Span 不足） | ✅（跨层必经） |
-| `ReleaseListToSpans` | `void ReleaseListToSpans(void*, size_t, CentralReleaseMode) noexcept` | 默认先吸收 TransferCache；`kSpanBitmap` 直接归还 bitmap | ✅ |
+| `ReleaseListToSpans` | `void ReleaseListToSpans(void*, size_t idx, CentralReleaseMode) noexcept` | `@pre idx < kNumSizeClasses`；默认先吸收 TransferCache；`kSpanBitmap` 直接归还 bitmap | ✅ |
 | `DrainTransferCaches` | `size_t DrainTransferCaches(size_t max_bytes) noexcept` | byte-budgeted cold-end detach；spin lock 外 direct bitmap release | ❌ |
 | `Reset` | `void Reset() noexcept` | 测试/受控 teardown：还原 bitmap、归还 Span、释放并**重建** TransferCache backing（重建失败则优雅降级慢路径、不 abort） | ❌ |
 | `GetOneSpan` | `static Span* (Bucket&, size_t, NoThrowUniqueLock&) noexcept` | 私有；持有桶锁进入，PageCache 期间释放，返回前无论成败均重新持锁 | ❌ |
-| `CalculateTotalTransferPtrs` | `static size_t () noexcept` | 私有；TransferCache 总指针容量单一来源，分配与释放共用 | ❌ |
+| `FillTransferCapacities` | `static size_t (std::array<size_t, kNumSizeClasses>&)` | 私有；单源计算各桶 capacity（`kCapScale`×batch）并返回总指针数，Init/Reset 共用 | ❌ |
 
 ## 6. 算法与流程
 
 ### 6.1 FetchRange（两阶段）
 
 1. TransferCache 快路径：锁内取 `min(batch_num, count)` 个指针，LIFO 顺序组装对象链。
-2. 不足部分进入 SpanList：持 `span_list_lock`，从队首 Span 用 `AllocObject()` 切分对象；Span 满则移到队尾；无 Span 时 `GetOneSpan` 补货。
+2. 不足部分进入 SpanList：持 `span_list_lock`，从队首 Span 用 `AllocObject()` 切分对象；Span 满则立即移到队尾（包括最后一次成功分配恰好填满 Span 的边界）并重新读取队首；只有队首无可用位且不存在 partial candidate 时才通过 `GetOneSpan` 补货。
 3. **预取**：除请求数外额外提取一个 batch（`prefetch_target = batch_num`），写入 TransferCache 供下一个请求者；锁外发布。
+
+SpanList 保持 **partial-before-full** 不变量：可分配 Span 位于满 Span 之前。`ReleaseListToSpans`
+将刚从 full 变为 partial 的 Span 移到队首；`FetchRange` 则在 Span 变满的同一锁域内
+将其移到队尾。旋转前必须保存 `Span*`，不得在 `erase` 后继续解引用已失效的 iterator。
 
 ### 6.2 ReleaseListToSpans
 
@@ -139,3 +143,7 @@ bucket 在本次调用中观察到的 snapshot，避免 producer 并发写入时
 | 2026-08-28 | TransferCache 构造期 OOM 改为 SpanList 降级，CentralCache slow path 收口为 `noexcept` | 兑现 ThreadCache 的 OOM 返回契约 | S-2 |
 | 2026-08-28 | core 锁守卫更名 `NoAlloc*` → `NoThrow*` 并加 `static_assert` 固化；`verify_allocator_core.py` 新增禁止 `std::lock_guard`/`std::unique_lock` | 原名标注了错误的轴（加锁不分配、但会抛），改名使契约可命名、可执法 | S-2 |
 | 2026-08-30 | 增加 direct bitmap release 和 byte-budgeted TransferCache drain | 让 frontend/middle-end retention 可释放空 Span 给 PageCache | I-2 |
+| 2026-09-14 | §5 `CalculateTotalTransferPtrs` → `FillTransferCapacities`：capacity 表单源计算，Reset 同源累加释放 | 消除三处重复查表与漂移风险 | — |
+| 2026-09-14 | §3 同步 `transfer_cache_count` → `transfer_cache_size/begin`（圆环 TransferCache） | 修复 verify_docs 符号漂移 | — |
+| 2026-09-14 | `FetchRange` 在 full Span 旋转后重新读取队首，exact-fill 亦立即移尾，并禁止解引用已失效 iterator | 防止跳过现有 partial Span 而过度申请新 Span 或产生假性 OOM | S1 |
+| 2026-09-14 | `ReleaseListToSpans` 参数 `aligned_size` → `idx`（调用方均已持有 idx） | 消除 idx↔size 往返；`AM_DCHECK` 替代无法校验的 size 边界 @pre，避免静默错桶 | — |

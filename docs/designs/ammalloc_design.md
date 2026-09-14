@@ -499,7 +499,7 @@ class alignas(CACHE_LINE_SIZE) ThreadCache {
 
 - **`FetchRange(block_list, batch_num, aligned_size)`**：先从 TransferCache 抓取（SpinLock 短临界区），不足部分再从 SpanList 的 Span 上按 bitmap 切分对象；两阶段返回总数可能小于请求数。
 
-- **`ReleaseListToSpans(start, aligned_size)`**：对象链先入 TransferCache，溢出时逐个归还所属 Span bitmap（`Span::FreeObject`）。
+- **`ReleaseListToSpans(start, idx)`**：对象链先入 TransferCache，溢出时逐个归还所属 Span bitmap（`Span::FreeObject`）。
 
 - **`GetOneSpan`（锁协议）**：SpanList 锁内发现无可用 Span 时，**先释放桶锁**再进入 PageCache 获取新 Span，取得后重新加锁插入——保证锁顺序"桶锁内不进 PageCache"，避免死锁。
 
