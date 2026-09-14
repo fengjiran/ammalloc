@@ -103,12 +103,23 @@ void EnsureScavengerStarted() noexcept {
     // clang-format on
 }
 
+// Largest request the large-object path can page-round without wrapping.
+constexpr size_t kMaxRequestBytes = std::numeric_limits<size_t>::max() - (SystemConfig::PAGE_SIZE - 1);
+
 AM_NOINLINE void* am_malloc_slow_path(size_t original_size) noexcept {
     // Defer scavenger thread creation until allocation is already on a slow path,
     // avoiding process-startup cost when ammalloc is never used.
     EnsureScavengerStarted();
 
     if (original_size > SizeConfig::MAX_TC_SIZE) {
+        // `AlignUp` below would wrap for near-SIZE_MAX requests, yielding a
+        // page count unrelated to the requested size. Reject up front instead
+        // of relying on the downstream Span page-count check.
+        // clang-format off
+        if (original_size > kMaxRequestBytes) AM_UNLIKELY {
+            return nullptr;
+        }
+        // clang-format on
         const auto aligned_size = detail::AlignUp(original_size, SystemConfig::PAGE_SIZE);
         const size_t page_num = aligned_size >> SystemConfig::PAGE_SHIFT;
         const auto* span = PageCache::GetInstance().AllocSpan(page_num);

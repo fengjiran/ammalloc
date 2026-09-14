@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -56,6 +57,24 @@ TEST(AmMallocAlignmentTest, BoundarySizesReturnAlignedAddresses) {
     // honor the same alignment contract.
     ExpectAlignedAllocations(SizeConfig::MAX_TC_SIZE, 64);
     ExpectAlignedAllocations(SizeConfig::MAX_TC_SIZE + 1, 64);
+}
+
+// Near-SIZE_MAX requests must not wrap during page rounding and carve a Span
+// sized for a different request. The entry guard rejects wrapping requests
+// before AlignUp; the largest non-wrapping request still fails cleanly through
+// the downstream Span page-count bound.
+TEST(AmMallocOversizeTest, NearSizeMaxRequestsReturnNull) {
+    constexpr size_t kMaxSize = std::numeric_limits<size_t>::max();
+    constexpr size_t kPageSize = SystemConfig::PAGE_SIZE;
+
+    // Wrapping region [kMaxSize - (kPageSize - 2), kMaxSize]: the smallest
+    // wrapping value and SIZE_MAX itself are both rejected by the guard.
+    EXPECT_EQ(am_malloc(kMaxSize), nullptr);
+    EXPECT_EQ(am_malloc(kMaxSize - (kPageSize - 2)), nullptr);
+
+    // Largest request that does not wrap: passes the guard and is only
+    // rejected later by the downstream page-count bound.
+    EXPECT_EQ(am_malloc(kMaxSize - (kPageSize - 1)), nullptr);
 }
 
 // CreateThreadCache allocates the ThreadCache metadata page via

@@ -402,6 +402,11 @@
 
 ### 📝 变更日志 (Changelog)
 
+- 2026-09-14
+  - **am_malloc 入口大小守卫（页对齐溢出显式化）**：
+    - `am_malloc_slow_path` 在页对齐前显式拒绝 `> SIZE_MAX - (PAGE_SIZE - 1)` 的请求：此前 `AlignUp` 对该区间会 wrap 到 0 页，仅依赖下游 `AllocSpanLocked` 的 `page_num==0` 检查隐式兜底（返回值均为 `nullptr`，本次为防御纵深显式化，无用户可见行为变化）
+    - 新增边界回归测试：`AmMallocOversizeTest.NearSizeMaxRequestsReturnNull`（覆盖 wrap 区间最小 `SIZE_MAX - 4094`、`SIZE_MAX` 与最大非 wrap 值三个边界）
+
 - 2026-03-19
   - **PageAllocator SystemFree 审查与大页策略演进**：
     - 完成 `SystemFree` 代码审查，识别 4 个待修复问题：
