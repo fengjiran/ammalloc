@@ -14,10 +14,12 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(benchmark)
 
-# Benchmarks are collected by GLOB_RECURSE with CONFIGURE_DEPENDS so newly
-# added benchmarks are picked up automatically. Keep non-benchmark .cpp
-# files out of benchmark/, they would become standalone executables.
-file(GLOB_RECURSE BENCH_SRC_FILES CONFIGURE_DEPENDS
+# Steady-state benchmarks are collected by GLOB (non-recursive) with
+# CONFIGURE_DEPENDS so newly added top-level benchmarks are picked up
+# automatically. The recursion is intentionally NOT used: the startup/
+# subdirectory holds an isolated-process target that must not be linked into
+# this executable. Keep non-benchmark .cpp files out of benchmark/.
+file(GLOB BENCH_SRC_FILES CONFIGURE_DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
 )
 
@@ -27,3 +29,6 @@ add_executable(${BENCH_TARGET} ${BENCH_SRC_FILES})
 target_link_libraries(${BENCH_TARGET} PRIVATE
         ${PROJECT_NAME}
         benchmark::benchmark_main)
+
+# Isolated startup / degradation / stress target with its own main().
+add_subdirectory(startup)
