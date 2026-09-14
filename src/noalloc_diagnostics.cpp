@@ -25,20 +25,8 @@ AM_NORETURN void FatalNoAlloc(const char* message) noexcept {
     std::abort();
 }
 
-void LockOrFatal(std::mutex& mutex) noexcept {
-    try {
-        mutex.lock();
-    } catch (...) {
-        FatalNoAlloc("std::mutex::lock failed");
-    }
-}
-
-void UnlockOrFatal(std::mutex& mutex) noexcept {
-    try {
-        mutex.unlock();
-    } catch (...) {
-        FatalNoAlloc("std::mutex::unlock failed");
-    }
-}
+// LockOrFatal and UnlockOrFatal are inline templates declared in
+// noalloc_diagnostics.h so they can be instantiated for both std::mutex and
+// the instrumented wrapper without duplicating the try/catch dispatch here.
 
 }// namespace ammalloc::detail

@@ -8,6 +8,10 @@ option(BUILD_TESTS "Adding test targets." ON)
 option(BUILD_BENCHMARKS "Adding benchmark targets." ON)
 option(USE_57BIT_VA "System use 57bits virtual address space." OFF)
 option(AM_HARDENED "Enable release-time free/double-free/interior-pointer guards." OFF)
+option(AMMALLOC_BENCH_INSTRUMENT_LOCKS
+       "Enable per-lock wait/hold histograms for offline contention analysis. \
+Never enable this for absolute throughput comparison; the extra clock reads \
+perturb the very hot paths being measured." OFF)
 
 add_subdirectory(src)
 

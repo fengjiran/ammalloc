@@ -48,6 +48,7 @@ void PageHeapScavenger::ScavengeLoop(std::stop_token stoken) {
 }
 
 void PageHeapScavenger::ScavengeOnePass() {
+    stats_.scavenge_passes.fetch_add(1, std::memory_order_relaxed);
     auto now = GetCurrentTimeMs();
     auto& page_cache = PageCache::GetInstance();
     size_t release_bytes = 0;
@@ -79,6 +80,7 @@ void PageHeapScavenger::ScavengeOnePass() {
                     it = span_list.erase(it);
                     // Reserve the detached Span so release/coalescing cannot claim it.
                     cur->SetUsed(true);
+                    stats_.scavenged_spans.fetch_add(1, std::memory_order_relaxed);
 
                     if (!head) {
                         head = cur;
@@ -102,7 +104,10 @@ void PageHeapScavenger::ScavengeOnePass() {
             if (madvise(start_ptr, size, MADV_DONTNEED) == 0) {
                 cur->SetCommitted(false);
                 release_bytes += size;
+                stats_.madvise_success_count.fetch_add(1, std::memory_order_relaxed);
+                stats_.scavenged_bytes.fetch_add(size, std::memory_order_relaxed);
             } else {
+                stats_.madvise_failed_count.fetch_add(1, std::memory_order_relaxed);
                 spdlog::warn("madvise MADV_DONTNEED failed for span {}",
                              static_cast<void*>(cur));
             }

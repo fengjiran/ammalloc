@@ -6,6 +6,7 @@
 /// @see docs/designs/03-central-cache.md
 
 #include "ammalloc/free_list.h"
+#include "ammalloc/lock_instrumentation.h"
 #include "ammalloc/noalloc_diagnostics.h"
 #include "ammalloc/size_class.h"
 #include "ammalloc/span.h"
@@ -18,6 +19,17 @@
 
 namespace ammalloc {
 
+/// @brief Mutex type used for `Bucket::span_list_lock`.
+///
+/// Defaults to `std::mutex`; under `AMMALLOC_INSTRUMENT_LOCKS` it becomes a
+/// wrapper that records wait/hold durations into the shared histogram.
+using SpanListMutex = detail::MaybeInstrumentedMutex;
+/// @brief RAII lock adapter for `SpanListMutex` matching the allocator's
+///        no-throw requirement.
+using SpanListUniqueLock = detail::NoThrowUniqueLock<SpanListMutex>;
+/// @brief Scoped guard adapter for `SpanListMutex`.
+using SpanListLockGuard = detail::NoThrowLockGuard<SpanListMutex>;
+
 /// @brief Chooses whether a returned object chain may enter TransferCache.
 ///
 /// Direct bitmap release is used by owner-thread RSS trims and by bounded
@@ -28,11 +40,39 @@ enum class CentralReleaseMode : uint8_t {
 };
 
 /// @brief Slow-path-only CentralCache retention telemetry.
+///
+/// Counters are cumulative since process start and use relaxed atomics;
+/// readers should treat them as best-effort observations rather than a
+/// mutually consistent snapshot. `CentralCache::Reset` intentionally does
+/// not clear them so long-running telemetry stays monotonic across resets.
 struct CentralCacheStats {
     /// Cumulative bytes removed from TransferCache via DrainTransferCaches.
     std::atomic<size_t> transfer_cache_drained_bytes{0};
     /// Count of spans that became fully empty after direct bitmap release.
+    /// Only incremented for CentralReleaseMode::kSpanBitmap so the layered
+    /// report can distinguish owner-thread trims from ordinary overflow.
     std::atomic<size_t> spans_unpinned_by_direct_release{0};
+    /// Cumulative objects popped directly from a bucket's TransferCache by
+    /// FetchRange without entering the SpanList mutex.
+    std::atomic<size_t> fetch_transfer_hit_objects{0};
+    /// Cumulative objects carved from Span bitmaps by FetchRange, including
+    /// the extra batch that is prefetched back into TransferCache.
+    std::atomic<size_t> fetch_span_list_objects{0};
+    /// Cumulative Spans successfully borrowed from PageCache by GetOneSpan
+    /// and installed at the front of a bucket's SpanList.
+    std::atomic<size_t> fetch_pagecache_spans{0};
+    /// Cumulative objects that could not fit into TransferCache during a
+    /// kTransferCache release and therefore fell through to Span bitmaps.
+    std::atomic<size_t> release_transfer_overflow_objects{0};
+    /// Cumulative Spans handed back to PageCache::ReleaseSpan by
+    /// ReleaseListToSpans, regardless of release mode.
+    std::atomic<size_t> release_spans_returned_to_pagecache{0};
+    /// Cumulative full-Span rotations (`erase` + `push_back`) performed by
+    /// FetchRange to keep partially free Spans near the SpanList head.
+    std::atomic<size_t> spanlist_rotations{0};
+    /// Cumulative Span visits inside FetchRange's SpanList traversal loop,
+    /// including revisits after a rotation.
+    std::atomic<size_t> spanlist_traversals{0};
 };
 
 #ifdef AMMALLOC_TEST
@@ -70,7 +110,7 @@ class CentralCache {
         // are held independently by different threads, and sharing a line would
         // ping-pong it between cores on hot size classes.
         /// Mutex protecting `span_list` and Span bitmap operations.
-        alignas(SystemConfig::CACHE_LINE_SIZE) std::mutex span_list_lock;
+        alignas(SystemConfig::CACHE_LINE_SIZE) SpanListMutex span_list_lock;
 
         // The 64-aligned inline sentinel then starts on its own line.
         /// Allocation-free intrusive list of borrowed Span metadata.
@@ -186,7 +226,7 @@ private:
     /// @return Borrowed Span owned by PageCache, or null on allocation failure.
     /// @pre `lock` owns `bucket.span_list_lock`.
     static Span* GetOneSpan(Bucket& bucket, size_t aligned_size,
-                            detail::NoThrowUniqueLock& lock) noexcept;
+                            SpanListUniqueLock& lock) noexcept;
 
     /// TransferCache capacity per bucket, expressed as a multiple of the
     /// class batch size.

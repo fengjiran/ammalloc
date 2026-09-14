@@ -5,11 +5,32 @@
 /// @brief Background reclamation of physical pages from idle PageCache spans.
 /// @see docs/designs/06-page-heap-scavenger.md, docs/decisions/0001-scavenger-startup-strategy.md
 
+#include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <stop_token>
 #include <thread>
 
 namespace ammalloc {
+
+/// @brief Best-effort scavenger telemetry stored in relaxed atomics.
+///
+/// `scavenged_bytes` measures pages that successfully returned to the OS via
+/// `MADV_DONTNEED`; it is the only counter in the ammalloc stack that
+/// reflects actual RSS reduction, one layer below the Span handoff counters
+/// in `CentralCacheStats`.
+struct ScavengerStats {
+    /// Number of completed `ScavengeOnePass()` invocations.
+    std::atomic<size_t> scavenge_passes{0};
+    /// Spans detached from PageCache free lists for reclamation.
+    std::atomic<size_t> scavenged_spans{0};
+    /// Bytes successfully released via `MADV_DONTNEED`.
+    std::atomic<size_t> scavenged_bytes{0};
+    /// Successful `madvise` calls (one per reclaimed Span).
+    std::atomic<size_t> madvise_success_count{0};
+    /// Failed `madvise` calls; the Span stays committed and retries next pass.
+    std::atomic<size_t> madvise_failed_count{0};
+};
 
 /// @brief Runs periodic `MADV_DONTNEED` reclamation for idle free spans.
 ///
@@ -38,6 +59,22 @@ public:
     /// @note Calls to `Start` and `Stop` must be externally serialized.
     void Stop();
 
+    /// @brief Returns the live scavenger telemetry counters.
+    /// @return Read-only reference to process-wide atomic counters.
+    static const ScavengerStats& GetStats() noexcept { return stats_; }
+
+    /// @brief Zeros every telemetry counter.
+    /// @note Intended for benchmark and test isolation; safe to call while the
+    ///       scavenger thread is running because each counter uses relaxed
+    ///       `store(0)` and observation is best-effort.
+    static void ResetStats() noexcept {
+        stats_.scavenge_passes.store(0, std::memory_order_relaxed);
+        stats_.scavenged_spans.store(0, std::memory_order_relaxed);
+        stats_.scavenged_bytes.store(0, std::memory_order_relaxed);
+        stats_.madvise_success_count.store(0, std::memory_order_relaxed);
+        stats_.madvise_failed_count.store(0, std::memory_order_relaxed);
+    }
+
 private:
     PageHeapScavenger() = default;
 
@@ -47,6 +84,8 @@ private:
     std::jthread scavenge_thread_;
     std::condition_variable_any cv_;
     std::mutex mutex_;
+
+    inline static ScavengerStats stats_{};
 
     /// Delay between scavenging passes.
     static constexpr uint64_t kScavengeIntervalMs = 1000;

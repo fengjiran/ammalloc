@@ -142,5 +142,6 @@ cmake-build-debug/
 build-asan/
 build-asan-ubsan/
 build-tsan/
+build-instrumented/
 .DS_Store
 3rdparty/

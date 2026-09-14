@@ -42,6 +42,10 @@ size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
         scratch_ptrs[i] = bucket.transfer_cache[TransferIndex(bucket, logical_index)];
     }
     bucket.transfer_cache_lock.unlock();
+    if (grab_count > 0) {
+        stats_.fetch_transfer_hit_objects.fetch_add(grab_count,
+                                                    std::memory_order_relaxed);
+    }
 
     size_t fetched = grab_count;
     void* head = nullptr;
@@ -65,9 +69,11 @@ size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
         size_t actual_prefetched = 0;
         size_t extracted = 0;
 
-        detail::NoThrowUniqueLock lock(bucket.span_list_lock);
+        SpanListUniqueLock lock(bucket.span_list_lock);
         auto& cur_span_list = bucket.span_list;
         auto begin = cur_span_list.begin();
+        size_t rotations = 0;
+        size_t traversals = 0;
         while (extracted < extract_target) {
             if (cur_span_list.empty() || begin->IsFull()) {
                 if (!GetOneSpan(bucket, aligned_size, lock)) {
@@ -77,6 +83,7 @@ size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
                 // head iterator before allocating from it.
                 begin = cur_span_list.begin();
             }
+            ++traversals;
 
             while (extracted < extract_target) {
                 void* obj = begin->AllocObject();
@@ -85,6 +92,7 @@ size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
                     Span* full_span = &*begin;
                     cur_span_list.erase(full_span);
                     cur_span_list.push_back(full_span);
+                    ++rotations;
                     begin = cur_span_list.begin();
                     break;
                 }
@@ -108,10 +116,23 @@ size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
                 Span* full_span = &*begin;
                 cur_span_list.erase(full_span);
                 cur_span_list.push_back(full_span);
+                ++rotations;
                 begin = cur_span_list.begin();
             }
         }
         // Publish prefetched pointers only after leaving the Span bitmap lock domain.
+        if (extracted > 0) {
+            stats_.fetch_span_list_objects.fetch_add(extracted,
+                                                     std::memory_order_relaxed);
+        }
+        if (traversals > 0) {
+            stats_.spanlist_traversals.fetch_add(traversals,
+                                                 std::memory_order_relaxed);
+        }
+        if (rotations > 0) {
+            stats_.spanlist_rotations.fetch_add(rotations,
+                                                std::memory_order_relaxed);
+        }
         lock.unlock();
 
         if (actual_prefetched > 0) {
@@ -192,13 +213,20 @@ void CentralCache::ReleaseListToSpans(void* start, size_t idx,
         }
 
         if (pushed < local_count) {
+            // Objects that could not be absorbed by TransferCache fall through
+            // to the Span bitmap path. Track the overflow so benchmarks can
+            // attribute release pressure between the two tiers.
+            if (mode == CentralReleaseMode::kTransferCache) {
+                stats_.release_transfer_overflow_objects.fetch_add(
+                        local_count - pushed, std::memory_order_relaxed);
+            }
             // Spans that reach use_count == 0 are collected into an intrusive
             // list and released to PageCache only after dropping the bucket
             // lock: one unlock per batch instead of one per empty Span, and no
             // PageCache entry while holding a CentralCache mutex (which would
             // invert the allocator lock order).
             Span* empty_span_head = nullptr;
-            detail::NoThrowUniqueLock lock(bucket.span_list_lock);
+            SpanListUniqueLock lock(bucket.span_list_lock);
             for (size_t i = pushed; i < local_count; ++i) {
                 void* obj = local_ptrs[i];
                 auto* span = PageMap::GetSpan(obj);
@@ -231,6 +259,8 @@ void CentralCache::ReleaseListToSpans(void* start, size_t idx,
 
             while (empty_span_head) {
                 auto* next_span = empty_span_head->next;
+                stats_.release_spans_returned_to_pagecache.fetch_add(
+                        1, std::memory_order_relaxed);
                 PageCache::GetInstance().ReleaseSpan(empty_span_head);
                 empty_span_head = next_span;
             }
@@ -336,7 +366,7 @@ void CentralCache::Reset() noexcept {
 
         Span* span_list_head = nullptr;
         {
-            detail::NoThrowLockGuard lock(bucket.span_list_lock);
+            SpanListLockGuard lock(bucket.span_list_lock);
 
             // Restore bitmap ownership for every object detached from TransferCache.
             void* cur = head;
@@ -424,7 +454,7 @@ bool CentralCache::TryInitTransferCache() noexcept {
 }
 
 Span* CentralCache::GetOneSpan(Bucket& bucket, size_t aligned_size,
-                               detail::NoThrowUniqueLock& lock) noexcept {
+                               SpanListUniqueLock& lock) noexcept {
     lock.unlock();
     auto page_num = SizeClass::GetMovePageNum(aligned_size);
     auto* span = PageCache::GetInstance().AllocSpan(page_num);
@@ -437,6 +467,7 @@ Span* CentralCache::GetOneSpan(Bucket& bucket, size_t aligned_size,
 
     span->Init(aligned_size);
     lock.lock();
+    stats_.fetch_pagecache_spans.fetch_add(1, std::memory_order_relaxed);
     bucket.span_list.push_front(span);
     return span;
 }

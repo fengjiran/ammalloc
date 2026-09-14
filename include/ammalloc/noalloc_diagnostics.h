@@ -24,14 +24,30 @@ namespace ammalloc::detail {
 AM_NORETURN void FatalNoAlloc(const char* message) noexcept;
 
 /// @brief Acquires a mutex or terminates with an allocation-free diagnostic.
+/// @tparam Mutex Any BasicLockable type (std::mutex, InstrumentedMutex, ...).
 /// @param mutex Mutex to acquire.
 /// @note A mutex failure is not recoverable as ordinary allocation OOM: the
 ///       ownership of shared allocator metadata can no longer be trusted.
-void LockOrFatal(std::mutex& mutex) noexcept;
+template<typename Mutex>
+void LockOrFatal(Mutex& mutex) noexcept {
+    try {
+        mutex.lock();
+    } catch (...) {
+        FatalNoAlloc("mutex::lock failed");
+    }
+}
 
 /// @brief Releases a mutex or terminates with an allocation-free diagnostic.
+/// @tparam Mutex Any BasicLockable type whose `unlock()` may throw.
 /// @param mutex Mutex to release.
-void UnlockOrFatal(std::mutex& mutex) noexcept;
+template<typename Mutex>
+void UnlockOrFatal(Mutex& mutex) noexcept {
+    try {
+        mutex.unlock();
+    } catch (...) {
+        FatalNoAlloc("mutex::unlock failed");
+    }
+}
 
 /// @brief RAII guard whose lock and unlock operations cannot throw.
 ///
@@ -40,9 +56,13 @@ void UnlockOrFatal(std::mutex& mutex) noexcept;
 /// throwing `std::system_error`, which would terminate silently at an
 /// allocator-core `noexcept` boundary. These guards convert that throw into an
 /// allocation-free fatal report, so no exception can escape.
+///
+/// The `Mutex` template parameter defaults to `std::mutex` so existing call
+/// sites keep working via CTAD; instrumented builds substitute a wrapper.
+template<typename Mutex = std::mutex>
 class NoThrowLockGuard {
 public:
-    explicit NoThrowLockGuard(std::mutex& mutex) noexcept : mutex_(mutex) {
+    explicit NoThrowLockGuard(Mutex& mutex) noexcept : mutex_(mutex) {
         LockOrFatal(mutex_);
     }
 
@@ -54,13 +74,14 @@ public:
     }
 
 private:
-    std::mutex& mutex_;
+    Mutex& mutex_;
 };
 
 /// @brief Moveless unique lock whose lock and unlock operations cannot throw.
+template<typename Mutex = std::mutex>
 class NoThrowUniqueLock {
 public:
-    explicit NoThrowUniqueLock(std::mutex& mutex) noexcept : mutex_(mutex), owns_(true) {
+    explicit NoThrowUniqueLock(Mutex& mutex) noexcept : mutex_(mutex), owns_(true) {
         LockOrFatal(mutex_);
     }
 
@@ -92,17 +113,17 @@ public:
     }
 
 private:
-    std::mutex& mutex_;
+    Mutex& mutex_;
     bool owns_;
 };
 
 // The NoThrow prefix is only trustworthy if the compiler can prove it. A
 // throwing lock path would silently reinstate the defect these guards exist to
 // prevent, so the guarantee is asserted instead of merely documented.
-static_assert(std::is_nothrow_constructible_v<NoThrowLockGuard, std::mutex&>);
-static_assert(std::is_nothrow_destructible_v<NoThrowLockGuard>);
-static_assert(std::is_nothrow_constructible_v<NoThrowUniqueLock, std::mutex&>);
-static_assert(std::is_nothrow_destructible_v<NoThrowUniqueLock>);
+static_assert(std::is_nothrow_constructible_v<NoThrowLockGuard<std::mutex>, std::mutex&>);
+static_assert(std::is_nothrow_destructible_v<NoThrowLockGuard<std::mutex>>);
+static_assert(std::is_nothrow_constructible_v<NoThrowUniqueLock<std::mutex>, std::mutex&>);
+static_assert(std::is_nothrow_destructible_v<NoThrowUniqueLock<std::mutex>>);
 
 }// namespace ammalloc::detail
 

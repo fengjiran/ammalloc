@@ -36,6 +36,14 @@ if (AM_HARDENED)
     target_compile_definitions(${PROJECT_NAME} PUBLIC AM_HARDENED)
 endif ()
 
+if (AMMALLOC_BENCH_INSTRUMENT_LOCKS)
+    # PUBLIC: spin_lock.h and lock_instrumentation.h change layout and inline
+    # hooks under this macro. Every consumer (benchmarks, tests) must see the
+    # same definition or the ABI of SpinLock and Bucket would disagree.
+    message(STATUS "Lock instrumentation ENABLED: hot-path timings will be perturbed")
+    target_compile_definitions(${PROJECT_NAME} PUBLIC AMMALLOC_INSTRUMENT_LOCKS)
+endif ()
+
 if (BUILD_TESTS)
     # PUBLIC: page_cache.h/page_allocator.h expose test-only helpers under
     # AMMALLOC_TEST; test targets inherit it through linking.
