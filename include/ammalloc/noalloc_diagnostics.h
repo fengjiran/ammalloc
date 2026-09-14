@@ -77,6 +77,7 @@ public:
         if (owns_) {
             FatalNoAlloc("NoThrowUniqueLock double lock");
         }
+
         LockOrFatal(mutex_);
         owns_ = true;
     }
@@ -85,6 +86,7 @@ public:
         if (!owns_) {
             FatalNoAlloc("NoThrowUniqueLock unlock without ownership");
         }
+
         UnlockOrFatal(mutex_);
         owns_ = false;
     }
