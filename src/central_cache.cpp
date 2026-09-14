@@ -7,6 +7,7 @@
 #include "ammalloc/spin_lock.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 
 namespace ammalloc {
@@ -27,23 +28,26 @@ size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
     const auto idx = SizeClass::Index(aligned_size);
     auto& bucket = buckets_[idx];
 
-    void* local_ptrs[SizeClass::kMaxBatchSize];
-    size_t fetched = 0;
+    // Only [0, grab_count) or [0, actual_prefetched) is read after being
+    // written. Reuse one uninitialized buffer for the non-overlapping
+    // TransferCache and SpanList phases to avoid clearing and reserving two
+    // 4 KiB pointer arrays on every call.
+    std::array<void*, SizeClass::kMaxBatchSize> scratch_ptrs;// NOLINT
 
     // Probe the O(1) TransferCache before taking the SpanList mutex.
     bucket.transfer_cache_lock.lock();
     size_t grab_count = std::min(fetch_num, bucket.transfer_cache_size);
     for (size_t i = 0; i < grab_count; ++i) {
         const size_t logical_index = --bucket.transfer_cache_size;
-        local_ptrs[i] = bucket.transfer_cache[TransferIndex(bucket, logical_index)];
+        scratch_ptrs[i] = bucket.transfer_cache[TransferIndex(bucket, logical_index)];
     }
     bucket.transfer_cache_lock.unlock();
 
-    fetched = grab_count;
+    size_t fetched = grab_count;
     void* head = nullptr;
     void* tail = nullptr;
     for (size_t i = fetched; i > 0; --i) {
-        void* obj = local_ptrs[i - 1];
+        void* obj = scratch_ptrs[i - 1];
         auto* node = static_cast<FreeBlock*>(obj);
         if (!head) {
             tail = obj;
@@ -53,12 +57,11 @@ size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
     }
 
     if (fetched < fetch_num) {
-        size_t need_for_thread = fetch_num - fetched;
+        const size_t need_for_thread = fetch_num - fetched;
         // Prefetch one additional batch to amortize the SpanList lock for the
         // next requester.
         // TODO(owner): Bound prefetching by the observed TransferCache capacity.
         const size_t extract_target = need_for_thread + fetch_num;
-        void* prefetch_ptrs[SizeClass::kMaxBatchSize];
         size_t actual_prefetched = 0;
         size_t extracted = 0;
 
@@ -66,7 +69,7 @@ size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
         auto& cur_span_list = bucket.span_list;
         auto begin = cur_span_list.begin();
         while (extracted < extract_target) {
-            if (cur_span_list.empty() || begin->use_count >= begin->capacity) {
+            if (cur_span_list.empty() || begin->IsFull()) {
                 if (!GetOneSpan(bucket, aligned_size, lock)) {
                     break;
                 }
@@ -79,8 +82,10 @@ size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
                 void* obj = begin->AllocObject();
                 if (!obj) {
                     // Keep full Spans behind candidates that still have free bits.
-                    cur_span_list.erase(begin);
-                    cur_span_list.push_back(&*begin);
+                    Span* full_span = &*begin;
+                    cur_span_list.erase(full_span);
+                    cur_span_list.push_back(full_span);
+                    begin = cur_span_list.begin();
                     break;
                 }
 
@@ -94,9 +99,16 @@ size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
                     head = node;
                     ++fetched;
                 } else {
-                    prefetch_ptrs[actual_prefetched++] = obj;
+                    scratch_ptrs[actual_prefetched++] = obj;
                 }
                 ++extracted;
+            }
+
+            if (begin->IsFull()) {
+                Span* full_span = &*begin;
+                cur_span_list.erase(full_span);
+                cur_span_list.push_back(full_span);
+                begin = cur_span_list.begin();
             }
         }
         // Publish prefetched pointers only after leaving the Span bitmap lock domain.
@@ -107,9 +119,8 @@ size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
             bucket.transfer_cache_lock.lock();
             while (successfully_pushed < actual_prefetched &&
                    bucket.transfer_cache_size < bucket.transfer_cache_capacity) {
-                const size_t slot = TransferIndex(bucket, bucket.transfer_cache_size++);
-                bucket.transfer_cache[slot] =
-                        prefetch_ptrs[successfully_pushed++];
+                bucket.transfer_cache[TransferIndex(bucket, bucket.transfer_cache_size++)] =
+                        scratch_ptrs[successfully_pushed++];
             }
             bucket.transfer_cache_lock.unlock();
 
@@ -119,12 +130,12 @@ size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
                 void* leftover_head = nullptr;
 
                 for (size_t i = successfully_pushed; i < actual_prefetched; ++i) {
-                    auto* node = static_cast<FreeBlock*>(prefetch_ptrs[i]);
+                    auto* node = static_cast<FreeBlock*>(scratch_ptrs[i]);
                     node->next = static_cast<FreeBlock*>(leftover_head);
-                    leftover_head = prefetch_ptrs[i];
+                    leftover_head = scratch_ptrs[i];
                 }
 
-                ReleaseListToSpans(leftover_head, aligned_size);
+                ReleaseListToSpans(leftover_head, idx);
             }
         }
     }
@@ -150,14 +161,16 @@ size_t CentralCache::GetTransferCacheCountForTest(size_t idx) noexcept {
     return count;
 }
 
-void CentralCache::ReleaseListToSpans(void* start, size_t aligned_size,
+void CentralCache::ReleaseListToSpans(void* start, size_t idx,
                                       CentralReleaseMode mode) noexcept {
-    const auto idx = SizeClass::Index(aligned_size);
+    AM_DCHECK(idx < SizeClass::kNumSizeClasses);
     auto& bucket = buckets_[idx];
     void* cur = start;
 
     while (cur) {
-        void* local_ptrs[SizeClass::kMaxBatchSize];
+        // Only [0, local_count) is read after being written; keep the buffer
+        // uninitialized to avoid clearing 4 KiB on every batch.
+        std::array<void*, SizeClass::kMaxBatchSize> local_ptrs;// NOLINT
         size_t local_count = 0;
         while (cur && local_count < SizeClass::kMaxBatchSize) {
             local_ptrs[local_count++] = cur;
@@ -172,8 +185,8 @@ void CentralCache::ReleaseListToSpans(void* start, size_t aligned_size,
             bucket.transfer_cache_lock.lock();
             while (pushed < local_count &&
                    bucket.transfer_cache_size < bucket.transfer_cache_capacity) {
-                const size_t slot = TransferIndex(bucket, bucket.transfer_cache_size++);
-                bucket.transfer_cache[slot] = local_ptrs[pushed++];
+                bucket.transfer_cache[TransferIndex(bucket, bucket.transfer_cache_size++)] =
+                        local_ptrs[pushed++];
             }
             bucket.transfer_cache_lock.unlock();
         }
@@ -247,17 +260,20 @@ size_t CentralCache::DrainTransferCaches(size_t max_bytes) noexcept {
         // append after the snapshot, but cannot make a drain with SIZE_MAX run
         // forever; a later pressure request handles newly retained objects.
         bucket.transfer_cache_lock.lock();
-        const size_t byte_limited_count = unbounded
-                                                  ? bucket.transfer_cache_size
-                                                  : std::min(bucket.transfer_cache_size, max_bytes / aligned_size);
+        const size_t snapshot_count =
+                unbounded
+                        ? bucket.transfer_cache_size
+                        : std::min(bucket.transfer_cache_size, max_bytes / aligned_size);
         bucket.transfer_cache_lock.unlock();
 
-        size_t remaining_from_snapshot = byte_limited_count;
+        size_t remaining_from_snapshot = snapshot_count;
         while (remaining_from_snapshot > 0) {
             const size_t batch_limit = std::min(SizeClass::kMaxBatchSize,
                                                 remaining_from_snapshot);
 
-            void* local_ptrs[SizeClass::kMaxBatchSize];
+            // Only [0, detached) is read after being written; keep the buffer
+            // uninitialized to avoid clearing 4 KiB on every batch.
+            std::array<void*, SizeClass::kMaxBatchSize> local_ptrs;// NOLINT
             bucket.transfer_cache_lock.lock();
             const size_t detached = std::min(batch_limit,
                                              bucket.transfer_cache_size);
@@ -288,7 +304,7 @@ size_t CentralCache::DrainTransferCaches(size_t max_bytes) noexcept {
             // The transfer lock is intentionally not held across PageMap,
             // bitmap, or PageCache work. ReleaseListToSpans drops the bucket
             // mutex before it can enter PageCache as well.
-            ReleaseListToSpans(head, aligned_size, CentralReleaseMode::kSpanBitmap);
+            ReleaseListToSpans(head, idx, CentralReleaseMode::kSpanBitmap);
 
             const size_t batch_bytes = detached * aligned_size;
             drained_bytes += batch_bytes;
@@ -350,7 +366,12 @@ void CentralCache::Reset() noexcept {
 
     // Bucket zero retains the base of the one contiguous TransferCache mapping.
     if (buckets_[0].transfer_cache) {
-        size_t total_ptrs = CalculateTotalTransferPtrs();
+        // Release the same total the allocation used: sum the stored bucket
+        // capacities instead of recomputing the batch policy.
+        size_t total_ptrs = 0;
+        for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
+            total_ptrs += buckets_[i].transfer_cache_capacity;
+        }
         size_t total_bytes = total_ptrs * sizeof(void*);
         size_t page_num = (total_bytes + SystemConfig::PAGE_SIZE - 1) >> SystemConfig::PAGE_SHIFT;
         PageAllocator::SystemFree(buckets_[0].transfer_cache, page_num);
@@ -370,17 +391,19 @@ void CentralCache::Reset() noexcept {
     static_cast<void>(TryInitTransferCache());
 }
 
-size_t CentralCache::CalculateTotalTransferPtrs() noexcept {
+size_t CentralCache::FillTransferCapacities(
+        std::array<size_t, SizeClass::kNumSizeClasses>& out) noexcept {
     size_t total_ptrs = 0;
     for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
-        auto batch_num = SizeClass::CalculateBatchSize(SizeClass::Size(i));
-        total_ptrs += kCapScale * batch_num;
+        out[i] = kCapScale * SizeClass::CalculateBatchSize(SizeClass::Size(i));
+        total_ptrs += out[i];
     }
     return total_ptrs;
 }
 
 bool CentralCache::TryInitTransferCache() noexcept {
-    const auto total_ptrs = CalculateTotalTransferPtrs();
+    std::array<size_t, SizeClass::kNumSizeClasses> capacities{};
+    const auto total_ptrs = FillTransferCapacities(capacities);
 
     // One PageAllocator mapping avoids recursive am_malloc entry and per-bucket VMAs.
     size_t total_bytes = total_ptrs * sizeof(void*);
@@ -392,11 +415,10 @@ bool CentralCache::TryInitTransferCache() noexcept {
 
     auto** cur_ptr = static_cast<void**>(p);
     for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
-        size_t batch_num = SizeClass::CalculateBatchSize(SizeClass::Size(i));
-        buckets_[i].transfer_cache_capacity = batch_num * kCapScale;
+        buckets_[i].transfer_cache_capacity = capacities[i];
         buckets_[i].transfer_cache = cur_ptr;
         buckets_[i].transfer_cache_begin = 0;
-        cur_ptr += buckets_[i].transfer_cache_capacity;
+        cur_ptr += capacities[i];
     }
     return true;
 }

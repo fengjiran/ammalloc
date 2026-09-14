@@ -143,7 +143,7 @@ AM_NOINLINE void am_free_slow_path(void* ptr, Span* span, size_t aligned_size,
         ptls = CreateThreadCache();
         if (!ptls) {
             static_cast<FreeBlock*>(ptr)->next = nullptr;
-            CentralCache::GetInstance().ReleaseListToSpans(ptr, aligned_size);
+            CentralCache::GetInstance().ReleaseListToSpans(ptr, idx);
             return;
         }
     }
@@ -223,7 +223,8 @@ void am_thread_cache_purge() noexcept {
 
     // This explicit calling-thread purge is a controlled reclamation boundary,
     // so drain all currently reachable middle-end retention as well.
-    CentralCache::GetInstance().DrainTransferCaches(std::numeric_limits<size_t>::max());
+    CentralCache::GetInstance().DrainTransferCaches(
+            std::numeric_limits<size_t>::max());
 }
 
 void am_request_thread_cache_trim() noexcept {
@@ -236,7 +237,8 @@ void am_request_thread_cache_purge() noexcept {
     // never reach a slow path (fully idle threads, and steady-state ones with
     // a balanced working set) still require their scheduler to call the
     // owner-thread purge API.
-    CentralCache::GetInstance().DrainTransferCaches(kCooperativeTransferDrainBytes);
+    CentralCache::GetInstance().DrainTransferCaches(
+            kCooperativeTransferDrainBytes);
 }
 
 }// namespace ammalloc

@@ -107,15 +107,19 @@ public:
     /// @pre `aligned_size` is an exact size-class boundary
     ///      (`SizeClass::Size(SizeClass::Index(aligned_size)) == aligned_size`);
     ///      Span::Init aborts otherwise in every build.
-    size_t FetchRange(FreeList& free_list, size_t fetch_num, size_t aligned_size) noexcept;
+    size_t FetchRange(FreeList& free_list, size_t fetch_num,
+                      size_t aligned_size) noexcept;
 
     /// @brief Returns an intrusive object chain to the matching shared bucket.
     /// @param start Head of a non-empty chain of objects from one size class.
-    /// @param aligned_size Size-class-aligned object size shared by every object.
+    /// @param idx Size-class index of the bucket that owns every object.
     /// @param mode Selects whether objects enter TransferCache or are released
     ///        directly to Span bitmaps.
-    /// @pre Each object belongs to an ammalloc Span for `aligned_size`.
-    void ReleaseListToSpans(void* start, size_t aligned_size,
+    /// @pre `idx < SizeClass::kNumSizeClasses` and every object belongs to an
+    ///      ammalloc Span of that size class.
+    /// @note Chains longer than `kMaxBatchSize` are drained in batches; the
+    ///       caller may pass the whole free list (for example at thread exit).
+    void ReleaseListToSpans(void* start, size_t idx,
                             CentralReleaseMode mode = CentralReleaseMode::kTransferCache) noexcept;
 
     /// @brief Returns bounded TransferCache contents directly to Span bitmaps.
@@ -154,11 +158,13 @@ private:
     ///         stays zeroed and callers degrade to the SpanList slow path.
     /// @note Used at construction and Reset; failure is a permanent SpanList
     ///       fallback until a controlled Reset retries initialization.
-    bool TryInitTransferCache() noexcept;
+    AM_NODISCARD bool TryInitTransferCache() noexcept;
 
-    /// @brief Returns the total pointer capacity of all TransferCache buckets.
-    /// @note Single source of truth for the contiguous backing size.
-    static size_t CalculateTotalTransferPtrs() noexcept;
+    /// @brief Fills per-bucket TransferCache capacities (`kCapScale * batch`)
+    ///        and returns their total, the single source for the contiguous
+    ///        backing size used by both allocation and release.
+    AM_NODISCARD static size_t FillTransferCapacities(
+            std::array<size_t, SizeClass::kNumSizeClasses>& out) noexcept;
 
     /// @brief Maps a logical cold-to-hot offset to a circular backing slot.
     /// @pre `offset < bucket.transfer_cache_capacity`.

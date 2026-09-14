@@ -154,14 +154,13 @@ void ThreadCache::ReleaseAll() noexcept {
     for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
         auto& list = free_lists_[i];
         if (!list.empty()) {
-            const auto size = SizeClass::Size(i);
             const auto chain = list.PopRange(list.size());
 
             // Thread exit may occur in bursts. Preserve the ordinary bounded
             // reuse path instead of turning every TLS destructor into a hard
             // bitmap/PageCache purge; callers that require RSS reclamation use
             // the explicit owner-thread purge API before worker teardown.
-            CentralCache::GetInstance().ReleaseListToSpans(chain.head, size);
+            CentralCache::GetInstance().ReleaseListToSpans(chain.head, i);
         }
         SetQuota(i, 1);
         list.set_overages(0);
@@ -201,7 +200,7 @@ void ThreadCache::Trim(ThreadCacheTrimMode mode, size_t target_bytes) noexcept {
             g_thread_cache_stats.trimmed_bytes.fetch_add(evicted_bytes,
                                                          std::memory_order_relaxed);
             CentralCache::GetInstance().ReleaseListToSpans(
-                    chain.head, class_size,
+                    chain.head, idx,
                     mode == ThreadCacheTrimMode::kReuse
                             ? CentralReleaseMode::kTransferCache
                             : CentralReleaseMode::kSpanBitmap);
@@ -280,7 +279,7 @@ void ThreadCache::DeallocateSlowPath(size_t idx) noexcept {
     // first so recently freed ones stay local for reuse. This bounds slow-path
     // work and avoids draining the local cache completely on every trim.
     if (const auto chain = list.PopRangeTail(batch_num); chain.head) {
-        CentralCache::GetInstance().ReleaseListToSpans(chain.head, aligned_size);
+        CentralCache::GetInstance().ReleaseListToSpans(chain.head, idx);
     }
 
     // Repeated overflow without intervening refill demand decays the quota
