@@ -9,6 +9,8 @@
 #include "ammalloc/common.h"
 #include "ammalloc/config.h"
 
+#include <algorithm>
+
 namespace ammalloc {
 
 /// @brief Describes one contiguous page range and its object-allocation state.
@@ -35,17 +37,17 @@ struct alignas(SystemConfig::CACHE_LINE_SIZE) Span {
 
     // Packed status flags. Use IsUsed/SetUsed/IsCommitted/SetCommitted.
     uint16_t flags{0};
-    uint16_t size_class_idx{0}; // Index into the CentralCache bucket array.
+    uint16_t size_class_idx{0};// Index into the CentralCache bucket array.
 
     // Object allocation metadata (valid when used by CentralCache).
     uint32_t aligned_obj_size{0};
     uint32_t capacity{0};   // Maximum objects stored in this Span.
     uint32_t use_count{0};  // Small objects absent from the bitmap, pinning this descriptor.
-    uint32_t scan_cursor{0}; // First bitmap word that may contain a free bit.
+    uint32_t scan_cursor{0};// First bitmap word that may contain a free bit.
 
     // Calculated data offset (avoids storing full pointer).
     uint32_t obj_offset{0};    // Offset from the page base to the first object.
-    uint32_t owner_shard_id{0}; // PageCache shard that owns this metadata.
+    uint32_t owner_shard_id{0};// PageCache shard that owns this metadata.
 
     // Cold data: used by background scavenger thread.
     uint64_t last_used_time_ms{0};
@@ -69,6 +71,13 @@ struct alignas(SystemConfig::CACHE_LINE_SIZE) Span {
     /// @return True when the committed flag is set.
     AM_NODISCARD AM_ALWAYS_INLINE bool IsCommitted() const noexcept {
         return flags & kCommittedMask;
+    }
+
+    /// @brief Reports whether every object slot in this Span is allocated.
+    /// @return True when `use_count` reached `capacity`.
+    /// @note Large-object Spans (`capacity == 0`) report full.
+    AM_NODISCARD AM_ALWAYS_INLINE bool IsFull() const noexcept {
+        return use_count >= capacity;
     }
 
     /// @brief Updates the used flag.
@@ -137,6 +146,67 @@ struct alignas(SystemConfig::CACHE_LINE_SIZE) Span {
     ///         those against `GetPageBaseAddr()`.
     AM_NODISCARD size_t ObjectSlotOf(void* ptr) const noexcept;
 };
+
+/// @brief Byte layout of one Span's bitmap and object grid.
+struct SpanLayout {
+    /// Bitmap words reserved at the span base.
+    size_t bitmap_num{0};
+    /// Offset from the page base to the first object slot.
+    uint32_t obj_offset{0};
+    /// Object slots carved by the span; 0 when the page range is too small.
+    uint32_t capacity{0};
+};
+
+/// @brief Computes the layout `Span::Init` applies to a `pages`-page span.
+/// @param aligned_size Size-class-aligned object size.
+/// @param page_num Page number of the span.
+/// @return Bitmap/data layout for the class. A zero `capacity` means the page
+///         range cannot fit even one object; the compile-time invariants in
+///         `span.cpp` forbid that state for every configured size class.
+AM_NODISCARD constexpr SpanLayout ComputeSpanLayout(size_t aligned_size, size_t page_num) noexcept {
+    constexpr size_t kMaxSize = std::numeric_limits<size_t>::max();
+    if (aligned_size == 0 || page_num == 0 ||
+        page_num > (kMaxSize >> SystemConfig::PAGE_SHIFT) ||
+        aligned_size > (kMaxSize - 1) / SystemConfig::BITS_PER_BYTE) {
+        return {};
+    }
+
+    const size_t total_bytes = page_num << SystemConfig::PAGE_SHIFT;
+    if (total_bytes > kMaxSize / SystemConfig::BITS_PER_BYTE) {
+        return {};
+    }
+
+    // Estimate bitmap + data layout:
+    // Total = BitmapBytes(1 bit per object) + DataBytes(obj_size per object)
+    const size_t max_objs = (total_bytes * SystemConfig::BITS_PER_BYTE) /
+                            (aligned_size * SystemConfig::BITS_PER_BYTE + 1);
+    const size_t bitmap_num = (max_objs >> SystemConfig::BITMAP_SHIFT) +
+                              ((max_objs & SystemConfig::BITMAP_MASK) != 0);
+    if (bitmap_num > kMaxSize / sizeof(uint64_t)) {
+        return {};
+    }
+
+    const size_t bitmap_bytes = bitmap_num * sizeof(uint64_t);
+    if (bitmap_bytes > kMaxSize - (SystemConfig::ALIGNMENT - 1)) {
+        return {};
+    }
+    const size_t data_start = detail::AlignUp(bitmap_bytes, SystemConfig::ALIGNMENT);
+    const size_t raw_capacity = data_start >= total_bytes
+                                        ? 0
+                                        : (total_bytes - data_start) / aligned_size;
+    const size_t capacity = std::min(max_objs, raw_capacity);
+    if (data_start > std::numeric_limits<uint32_t>::max() ||
+        capacity > std::numeric_limits<uint32_t>::max()) {
+        return {};
+    }
+
+    SpanLayout layout;
+    layout.bitmap_num = bitmap_num;
+    layout.obj_offset = static_cast<uint32_t>(data_start);
+    // Alignment and whole-word bitmap rounding may reduce the ideal estimate.
+    layout.capacity = static_cast<uint32_t>(capacity);
+    return layout;
+}
 
 // The message stays literal: static_assert requires a string literal, so it
 // describes the invariant instead of hardcoding CACHE_LINE_SIZE's value.

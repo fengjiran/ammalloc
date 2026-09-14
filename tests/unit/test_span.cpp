@@ -214,13 +214,36 @@ TEST(SpanTest, Init_MultiPageLayout) {
     EXPECT_LE(data_base + ts.span.capacity * ts.span.aligned_obj_size, page_base + total_bytes);
 }
 
-// An object size larger than the backing pages leaves no room for data after
-// the bitmap: capacity collapses to zero and allocation always fails.
-TEST(SpanTest, Init_CapacityZero) {
-    TestSpan ts(8192);
+TEST(SpanTest, ComputeSpanLayoutRejectsZeroInputs) {
+    constexpr SpanLayout zero_size = ComputeSpanLayout(0, 1);
+    constexpr SpanLayout zero_pages = ComputeSpanLayout(16, 0);
 
-    EXPECT_EQ(ts.span.capacity, 0u);
-    EXPECT_EQ(ts.span.AllocObject(), nullptr);
+    EXPECT_EQ(zero_size.capacity, 0u);
+    EXPECT_EQ(zero_size.bitmap_num, 0u);
+    EXPECT_EQ(zero_pages.capacity, 0u);
+    EXPECT_EQ(zero_pages.bitmap_num, 0u);
+}
+
+TEST(SpanTest, ComputeSpanLayoutRejectsObjectOnlyFitWithoutBitmap) {
+    constexpr size_t kObjectSize = SizeConfig::MAX_TC_SIZE;
+    constexpr size_t kExactObjectPages = kObjectSize / SystemConfig::PAGE_SIZE;
+    constexpr SpanLayout layout = ComputeSpanLayout(kObjectSize, kExactObjectPages);
+
+    EXPECT_EQ(layout.capacity, 0u);
+    EXPECT_EQ(layout.bitmap_num, 0u);
+}
+
+// A valid size class still requires enough backing for its bitmap and at
+// least one object. Accepting a zero-capacity small-object Span would make
+// CentralCache refill repeatedly until PageCache OOM.
+TEST(SpanTest, Init_InsufficientBackingDeath) {
+    void* ptr = PageAllocator::SystemAlloc(1);
+    ASSERT_NE(ptr, nullptr);
+    Span span(detail::PtrToPageId(ptr), 1);
+
+    EXPECT_DEATH(span.Init(8192), "Check failed");
+
+    PageAllocator::SystemFree(ptr, 1);
 }
 
 TEST(SpanTest, FlagBits_SetAndClear) {

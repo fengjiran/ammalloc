@@ -19,22 +19,21 @@ void Span::Init(size_t aligned_object_size) noexcept {
     aligned_obj_size = static_cast<uint32_t>(aligned_object_size);
     size_class_idx = static_cast<uint16_t>(idx);
     void* start_ptr = detail::PageIDToPtr(start_page_idx);
-    const size_t total_bytes = page_num << SystemConfig::PAGE_SHIFT;
 
-    // Estimate bitmap + data layout:
-    // Total = BitmapBytes(1 bit per object) + DataBytes(obj_size per object)
-    size_t max_objs = (total_bytes * SystemConfig::BITS_PER_BYTE) /
-                      (aligned_obj_size * SystemConfig::BITS_PER_BYTE + 1);
-    size_t bitmap_num = (max_objs + SystemConfig::BITMAP_MASK) >> SystemConfig::BITMAP_SHIFT;
-    auto* bitmap = new (start_ptr) uint64_t[bitmap_num];
+    const SpanLayout layout = ComputeSpanLayout(aligned_object_size, page_num);
+    const size_t needed_bitmap_words =
+            (layout.capacity >> SystemConfig::BITMAP_SHIFT) +
+            ((layout.capacity & SystemConfig::BITMAP_MASK) != 0);
+    AM_CHECK(layout.capacity > 0);
+    AM_CHECK(layout.bitmap_num >= needed_bitmap_words);
 
-    uintptr_t data_start = reinterpret_cast<uintptr_t>(bitmap) + bitmap_num * sizeof(uint64_t);
-    data_start = detail::AlignUp(data_start, SystemConfig::ALIGNMENT);
-    obj_offset = static_cast<uint32_t>(data_start - reinterpret_cast<uintptr_t>(start_ptr));
+    const size_t total_bytes = static_cast<size_t>(page_num) << SystemConfig::PAGE_SHIFT;
+    AM_CHECK(layout.obj_offset <= total_bytes &&
+             layout.capacity <= (total_bytes - layout.obj_offset) / aligned_object_size);
 
-    // Capacity may be less than max_objs due to alignment overhead.
-    uintptr_t data_end = reinterpret_cast<uintptr_t>(start_ptr) + total_bytes;
-    capacity = data_start >= data_end ? 0 : (data_end - data_start) / aligned_obj_size;
+    obj_offset = layout.obj_offset;
+    capacity = layout.capacity;
+    auto* bitmap = new (start_ptr) uint64_t[layout.bitmap_num];
 
     // Initialize bitmap: set first 'capacity' bits to 1 (free).
     size_t full_bitmap_num = capacity >> SystemConfig::BITMAP_SHIFT;
@@ -43,9 +42,9 @@ void Span::Init(size_t aligned_object_size) noexcept {
         bitmap[i] = ~0ULL;
     }
 
-    if (full_bitmap_num < bitmap_num) {
+    if (full_bitmap_num < layout.bitmap_num) {
         bitmap[full_bitmap_num] = tail_bits == 0 ? 0 : ((1ULL << tail_bits) - 1);
-        for (size_t i = full_bitmap_num + 1; i < bitmap_num; ++i) {
+        for (size_t i = full_bitmap_num + 1; i < layout.bitmap_num; ++i) {
             bitmap[i] = 0;
         }
     }
@@ -56,7 +55,7 @@ void Span::Init(size_t aligned_object_size) noexcept {
 
 void* Span::AllocObject() noexcept {
     // clang-format off
-    if (use_count >= capacity) AM_UNLIKELY {
+    if (IsFull()) AM_UNLIKELY {
         return nullptr;
     }
 
@@ -126,5 +125,42 @@ size_t Span::ObjectSlotOf(void* ptr) const noexcept {
     }
     return offset / aligned_obj_size;
 }
+
+namespace {
+
+/// @brief Whether every size class carves at least one object per its span.
+consteval bool EveryClassFitsAtLeastOneObject() {
+    for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
+        const size_t obj_size = SizeClass::Size(i);
+        if (ComputeSpanLayout(obj_size, SizeClass::GetMovePageNum(obj_size)).capacity == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// @brief Whether the bitmap words Init reserves cover every object slot.
+consteval bool BitmapCoversEverySlot() {
+    for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
+        const size_t obj_size = SizeClass::Size(i);
+        const SpanLayout layout = ComputeSpanLayout(obj_size, SizeClass::GetMovePageNum(obj_size));
+        const size_t needed_words = (layout.capacity + SystemConfig::BITMAP_MASK) >>
+                                    SystemConfig::BITMAP_SHIFT;
+        if (needed_words > layout.bitmap_num) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}// namespace
+
+// Both invariants depend only on the page/batch tables. A zero-capacity span
+// would make CentralCache request fresh spans until PageCache OOM, and an
+// undersized bitmap would make AllocObject() read words outside the reserved
+// bitmap area; failing here beats degrading silently.
+static_assert(EveryClassFitsAtLeastOneObject(),
+              "every size class must fit at least one object per span");
+static_assert(BitmapCoversEverySlot(), "the span bitmap must cover every object slot");
 
 }// namespace ammalloc
