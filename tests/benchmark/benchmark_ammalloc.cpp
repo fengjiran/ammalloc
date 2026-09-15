@@ -1,12 +1,13 @@
-//
-// Performance Benchmark Tests for ammalloc using Google Benchmark
-//
+// End-to-end benchmarks for the public allocator API (am_malloc/am_free).
+// Every allocator scenario is paired with a std::malloc/std::free baseline so
+// both can be compared in the same run: fast path, ThreadCache steady state,
+// large live windows, bulk churn, random sizes, and multithread scaling.
 
 #include "ammalloc/ammalloc.h"
 #include "ammalloc/config.h"
 
-#include <benchmark/benchmark.h>
 #include <array>
+#include <benchmark/benchmark.h>
 #include <cstdlib>
 #include <random>
 #include <thread>
@@ -214,7 +215,7 @@ void BM_std_malloc_multithread(benchmark::State& state) {
 template<size_t BatchSize>
 void BM_am_malloc_multithread_random(benchmark::State& state) {
     constexpr size_t kNumSizes = 8192;
-    std::array<size_t, kNumSizes> sizes;
+    std::array<size_t, kNumSizes> sizes{};
     std::mt19937 rng(state.thread_index());             // Distinct seed per thread.
     std::uniform_int_distribution<size_t> dist(1, 1024);// Random 1B..1KB requests.
     for (size_t i = 0; i < kNumSizes; ++i) sizes[i] = dist(rng);
