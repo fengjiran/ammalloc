@@ -9,11 +9,10 @@
 #include "ammalloc/page_cache.h"
 #include "ammalloc/page_heap_scavenger.h"
 
-#include <benchmark/benchmark.h>
-
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <benchmark/benchmark.h>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -948,11 +947,21 @@ void BM_CentralCache_Drain_Bounded(benchmark::State& state) {
     const size_t object_count = std::min(TransferCapacity(size), 4 * batch);
     size_t byte_budget = 0;
     switch (budget_kind) {
-        case 0: byte_budget = 0; break;
-        case 1: byte_budget = size - 1; break;
-        case 2: byte_budget = size; break;
-        case 3: byte_budget = batch * size; break;
-        case 4: byte_budget = 2 * batch * size; break;
+        case 0:
+            byte_budget = 0;
+            break;
+        case 1:
+            byte_budget = size - 1;
+            break;
+        case 2:
+            byte_budget = size;
+            break;
+        case 3:
+            byte_budget = batch * size;
+            break;
+        case 4:
+            byte_budget = 2 * batch * size;
+            break;
         default:
             state.SkipWithError("unknown budget_kind");
             return;
@@ -1638,7 +1647,7 @@ void BM_CentralCache_SpanList_SparseSingleSpan(benchmark::State& state) {
 // and guarantees every benchmark in a family sees the same size/batch sweep.
 
 void ApplyFetchArgs(benchmark::internal::Benchmark* b) {
-    for (const int size : kBenchSizes) {
+    for (const int size: kBenchSizes) {
         const auto s = static_cast<size_t>(size);
         const size_t batch = SizeClass::CalculateBatchSize(s);
         b->Args({size, 1});
@@ -1652,7 +1661,7 @@ void ApplyFetchArgs(benchmark::internal::Benchmark* b) {
 // Same as ApplyFetchArgs but skips batch == 1 since PartialTransferAndSpan
 // cannot construct a strict partial hit with a single-object request.
 void ApplyPartialFetchArgs(benchmark::internal::Benchmark* b) {
-    for (const int size : kBenchSizes) {
+    for (const int size: kBenchSizes) {
         const auto s = static_cast<size_t>(size);
         const size_t batch = SizeClass::CalculateBatchSize(s);
         if (batch / 2 > 1) {
@@ -1665,7 +1674,7 @@ void ApplyPartialFetchArgs(benchmark::internal::Benchmark* b) {
 }
 
 void ApplySizeArgs(benchmark::internal::Benchmark* b) {
-    for (const int size : kBenchSizes) {
+    for (const int size: kBenchSizes) {
         b->Args({size});
     }
 }
@@ -1685,7 +1694,7 @@ void ApplyLongChainArgs(benchmark::internal::Benchmark* b) {
             {4096, {8, 64, 512, 1024, 0}, 4},
             {32768, {2, 16, 64, 0, 0}, 3},
     }};
-    for (const auto& row : kRows) {
+    for (const auto& row: kRows) {
         for (int i = 0; i < row.count; ++i) {
             b->Args({row.size, row.chains[static_cast<size_t>(i)]});
         }
@@ -1695,7 +1704,7 @@ void ApplyLongChainArgs(benchmark::internal::Benchmark* b) {
 // Bounded-drain budgets: 0, S-1, S, B*S, 2*B*S. SIZE_MAX lives in the
 // dedicated UnboundedMultiClass and ColdEndWrap cases.
 void ApplyDrainBoundedArgs(benchmark::internal::Benchmark* b) {
-    for (const int size : kBenchSizes) {
+    for (const int size: kBenchSizes) {
         for (int kind = 0; kind <= 4; ++kind) {
             b->Args({size, kind});
         }
@@ -1705,7 +1714,7 @@ void ApplyDrainBoundedArgs(benchmark::internal::Benchmark* b) {
 // MultipleBatches needs transfer capacity > kMaxBatchSize so at least two
 // internal iterations run; skip sizes where capacity is too small.
 void ApplyDrainMultipleBatchArgs(benchmark::internal::Benchmark* b) {
-    for (const int size : kBenchSizes) {
+    for (const int size: kBenchSizes) {
         const auto s = static_cast<size_t>(size);
         if (TransferCapacity(s) > SizeClass::kMaxBatchSize) {
             b->Args({size});
@@ -1722,8 +1731,8 @@ void ApplyContentionThreads(benchmark::internal::Benchmark* b) {
 // smallest multiplier is bounded by the 32768-byte class (capacity 16, batch
 // 2), where free_mult <= 8; {3, 4, 6} is safe for every swept size.
 void ApplySpanListSparseArgs(benchmark::internal::Benchmark* b) {
-    for (const int size : kBenchSizes) {
-        for (const int free_mult : {3, 4, 6}) {
+    for (const int size: kBenchSizes) {
+        for (const int free_mult: {3, 4, 6}) {
             b->Args({size, free_mult});
         }
     }

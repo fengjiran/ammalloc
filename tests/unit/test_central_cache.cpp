@@ -31,7 +31,8 @@ protected:
 
 void ReleaseOneToBitmap(CentralCache& cache, void* object, size_t size) {
     static_cast<FreeBlock*>(object)->next = nullptr;
-    cache.ReleaseListToSpans(object, SizeClass::Index(size), CentralReleaseMode::kSpanBitmap);
+    cache.ReleaseListToSpans(object, SizeClass::Index(size),
+                             CentralReleaseMode::kSpanBitmap);
 }
 
 void ReleaseFreeListToBitmap(CentralCache& cache, FreeList& list, size_t size) {
