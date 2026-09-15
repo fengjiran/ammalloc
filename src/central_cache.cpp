@@ -418,7 +418,7 @@ void CentralCache::Reset() noexcept {
 
     // Rebuild the backing so the singleton keeps its O(1) fast path after
     // Reset; an OOM here degrades gracefully to the SpanList slow path.
-    static_cast<void>(TryInitTransferCache());
+    UNUSED(TryInitTransferCache());
 }
 
 size_t CentralCache::FillTransferCapacities(
