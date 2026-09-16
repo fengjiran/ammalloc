@@ -209,6 +209,8 @@ SpanBitmapFree
 
 ## 7.5 显式 ObjectBatch 接口
 
+> **实施状态（2026-09-16，阶段 1 已落地）**：Release 方向已引入 move-only `ObjectBatch`，字段为 `head/tail/count/size_class_idx`（`size_t`，暂未加入 `shard_id`，因当前无完整 Central shard 协议）。`CentralCache::ReleaseBatch(ObjectBatch, mode)` 取代并删除了裸链头入口 `ReleaseListToSpans`；`FreeList::PopBatch/PopBatchTail` 产生批次，`ObjectBatch::FromSingleObject`（单对象）与 `ObjectBatch::AdoptChain(FreeChain, idx)`（跨线程无锁队列等外部裸链的唯一可审计 adoption 边界）为受控工厂。跨线程 handoff 用可复制 POD `TransferRecord{FreeChain, size_class_idx}` 传输，消费端一次性 adopt 进入 move-only 协议。`FetchBatch -> ObjectBatch` 对称接口（Fetch/Push 方向）仍留待阶段 2 评估，当前 Fetch/Push 继续使用 `FreeChain`。
+
 ### 7.5.1 设计目的
 
 当前接口用 `FreeList&` 和裸链表头分别表达 fetch 与 release，数量、尾指针、size class 和 shard 信息分散在调用约定中。建议引入不分配内存的内部批次描述：
