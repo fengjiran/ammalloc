@@ -14,7 +14,7 @@ ThreadCache 是分配器的前端缓存：每个线程一个 TLS 实例，处理
 
 - **提供**：`Allocate`/`Deallocate`（快路径）+ `ReleaseAll`（TLS 销毁时全量归还）。
 
-- **请求**：`CentralCache::FetchRange`（refill）、`CentralCache::ReleaseListToSpans`（trim/全量归还）。
+- **请求**：`CentralCache::FetchRange`（refill）、`CentralCache::ReleaseBatch`（trim/全量归还）。
 
 - **所有权**：FreeList 中的对象所有权始终属于分配器系统；ThreadCache 只是借用。TLS 析构时 `ReleaseAll` 把全部对象归还 CentralCache 后再销毁 ThreadCache 元数据（`PageAllocator::SystemFree`）。
 
@@ -219,7 +219,7 @@ CAS 循环把公告板写为新值 `((observed >> 1) + 1) << 1 | mode`：
 
 `Trim` 是「剪枝」操作：只剪掉暂闲的空闲对象与多余配额，绝不触碰正在使用的对象。一次调用同时做两件事：
 
-1. **对象层（驱逐 evict）**：先 `CachedBytesSnapshot()` 精确结算本线程当前驻留字节；`excess = cached_bytes − target_bytes`，然后**从大类到小类**扫描，每类按`ceil(excess / class_size)` 计算应驱逐数，`PopRangeTail` 从**尾部（最旧）**弹出对象并 `ReleaseListToSpans` 归还；每还一批递减 `cached_bytes`，excess 归零即停。
+1. **对象层（驱逐 evict）**：先 `CachedBytesSnapshot()` 精确结算本线程当前驻留字节；`excess = cached_bytes − target_bytes`，然后**从大类到小类**扫描，每类按`ceil(excess / class_size)` 计算应驱逐数，`PopBatchTail` 从**尾部（最旧）**弹出对象批（move-only `ObjectBatch`）并 `ReleaseBatch` 归还；每还一批递减 `cached_bytes`，excess 归零即停。
 2. **配额层（收缩 contract）**：`SetQuota(idx, min(max_size, contracted))` 把突发期涨上去的配额回调（同步释放线程级预算预留），并清零 `overages` 衰减计数——**只降不升**。
 
 两种模式：
@@ -431,7 +431,7 @@ ThreadCache 的容量限制不是一段独立的策略代码，而是**五道分
 
 - **关联代码**: [include/ammalloc/thread\_cache.h](../../include/ammalloc/thread_cache.h) / [src/thread\_cache.cpp](../../src/thread_cache.cpp) / [include/ammalloc/free\_list.h](../../include/ammalloc/free_list.h)（`FreeList`/`FreeBlock`）
 
-- **上游依赖**: `SizeClass`（Index/Size/CalculateBatchSize）、`CentralCache`（FetchRange/ReleaseListToSpans）
+- **上游依赖**: `SizeClass`（Index/Size/CalculateBatchSize）、`CentralCache`（FetchRange/ReleaseBatch）
 
 - **下游消费者**: `ammalloc.cpp`（`am_malloc`/`am_free` 主入口）
 
