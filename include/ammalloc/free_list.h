@@ -43,10 +43,12 @@ struct FreeChain {
 ///
 /// An ObjectBatch carries a single intrusive chain (head/tail/count) plus the
 /// size class that owns every object. Exactly one live instance is responsible
-/// for delivering the batch to the next layer (a CentralCache release). Moving
-/// transfers that responsibility and empties the source; copying is forbidden so
-/// two descriptors can never claim the same chain, and move assignment is
-/// deleted so a batch can never be overwritten while still holding objects.
+/// for delivering the batch to the next legitimate owner — a CentralCache
+/// release (ReleaseBatch), a frontend fetch-accept (FreeList::PushBatch), or a
+/// cross-thread transport detach (DetachChainForTransport). Moving transfers
+/// that responsibility and empties the source; copying is forbidden so two
+/// descriptors can never claim the same chain, and move assignment is deleted
+/// so a batch can never be overwritten while still holding objects.
 ///
 /// @note Ownership here means "who must keep delivering these objects", not
 ///       "free on destruct". The objects and their Span storage stay owned by
@@ -137,6 +139,25 @@ public:
         return size_class_idx_;
     }
 
+    /// @brief Converts this token back into a copyable transport chain.
+    /// @return The detached `FreeChain` (head/tail/count); empty for an empty
+    ///         batch. The size class is deliberately NOT carried: the caller
+    ///         binds it into the transport record so class identity travels with
+    ///         the chain across the queue and is re-adopted on the far side.
+    /// @note The reverse of `AdoptChain` — the single audited edge where a
+    ///       move-only token degrades to a copyable representation for a
+    ///       lock-free ring. `&&`-qualified and empties the source via
+    ///       MarkProcessed, so one token can never feed two queues. O(1): it
+    ///       copies three scalars and never walks the chain.
+    AM_NODISCARD FreeChain DetachChainForTransport() && noexcept {
+        if (empty()) {
+            return {};
+        }
+        FreeChain out{head_, tail_, count_};
+        MarkProcessed();
+        return out;
+    }
+
 private:
     friend class FreeList;
     friend class CentralCache;
@@ -146,10 +167,14 @@ private:
         AM_DCHECK(IsCanonical());
     }
 
-    /// @brief Records that CentralCache finished handling the whole input.
-    /// @note Means "this batch has been processed", NOT "every object reached a
-    ///       cache or bitmap". Precondition violations (for example a PageMap
-    ///       miss) are defensively skipped yet still land here.
+    /// @brief Records that this token's delivery responsibility has been handed
+    ///        to the next legitimate owner.
+    /// @note Means "this batch has been processed", NOT "every object was
+    ///       released or returned to a bitmap" and NOT "each object's delivery
+    ///       succeeded". It is the shared exit for every consumer: a
+    ///       CentralCache release, a FreeList fetch-accept, or a transport
+    ///       detach. Precondition violations (for example a PageMap miss) are
+    ///       defensively skipped yet still land here.
     void MarkProcessed() noexcept {
         head_ = nullptr;
         tail_ = nullptr;
@@ -254,6 +279,28 @@ public:
         static_cast<FreeBlock*>(chain.tail)->next = head_;
         head_ = static_cast<FreeBlock*>(chain.head);
         size_ += chain.count;
+    }
+
+    /// @brief Consumes a fetched batch, prepending its chain to this list.
+    /// @param batch Ownership token produced by `CentralCache::FetchBatch`; taken
+    ///        by value so this list becomes the sole owner. Always marked
+    ///        processed before returning, so an empty or fully accepted batch
+    ///        never trips the destructor's consumed assertion.
+    /// @note Frontend counterpart of `CentralCache::ReleaseBatch`: fetch moves a
+    ///       batch in, release moves one out. Class-agnostic by design — routing
+    ///       the batch to the right `free_lists_[idx]` is the ThreadCache's job,
+    ///       not this container's. The chain is already canonical (debug-verified
+    ///       when the batch was built), so no re-walk is needed here.
+    void PushBatch(ObjectBatch batch) noexcept {
+        if (batch.empty()) {
+            batch.MarkProcessed();
+            return;
+        }
+
+        static_cast<FreeBlock*>(batch.tail())->next = head_;
+        head_ = static_cast<FreeBlock*>(batch.head());
+        size_ += batch.count();
+        batch.MarkProcessed();
     }
 
     /// @brief Removes up to `n` objects from the front, preserving chain order.

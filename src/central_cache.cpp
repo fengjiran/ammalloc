@@ -13,19 +13,24 @@
 namespace ammalloc {
 
 #ifdef AMMALLOC_TEST
-std::atomic<size_t> g_mock_fetch_range_cap{0};
+std::atomic<size_t> g_mock_fetch_batch_cap{0};
 #endif
 
-size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
-                                size_t aligned_size) noexcept {
-    AM_DCHECK(fetch_num <= SizeClass::kMaxBatchSize);
+ObjectBatch CentralCache::FetchBatch(size_t idx, size_t preferred_count) noexcept {
+    AM_DCHECK(idx < SizeClass::kNumSizeClasses);
+    AM_DCHECK(preferred_count <= SizeClass::kMaxBatchSize);
+
+    // `fetch_num` is the effective request after the test-only partial-refill cap.
+    size_t fetch_num = preferred_count;
 #ifdef AMMALLOC_TEST
-    if (const size_t cap = g_mock_fetch_range_cap.load(std::memory_order_relaxed);
+    if (const size_t cap = g_mock_fetch_batch_cap.load(std::memory_order_relaxed);
         cap > 0 && cap < fetch_num) {
         fetch_num = cap;
     }
 #endif
-    const auto idx = SizeClass::Index(aligned_size);
+    // Deriving the class size from idx removes the old aligned_size->idx round
+    // trip and its "aligned_size must sit on a class boundary" precondition.
+    const size_t aligned_size = SizeClass::Size(idx);
     auto& bucket = buckets_[idx];
 
     // Only [0, grab_count) or [0, actual_prefetched) is read after being
@@ -165,12 +170,15 @@ size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
         }
     }
 
-    if (fetched > 0) {
-        // `fetched` is the node count of the head/tail chain built above;
-        // PushRange trusts `count` (debug-verified), so keep them in lockstep.
-        free_list.PushRange(FreeChain{head, tail, fetched});
+    if (fetched == 0) {
+        // Nothing could be carved (empty supply or OOM). Hand back an empty batch
+        // with the invalid-class sentinel rather than a partial token; a partial
+        // (0 < fetched < fetch_num) result still returns its extracted prefix.
+        return {};
     }
-    return fetched;
+    // `fetched` is the node count of the head/tail chain built above; the
+    // canonical constructor debug-verifies reachability, so keep them in lockstep.
+    return ObjectBatch(head, tail, fetched, idx);
 }
 
 const CentralCacheStats& CentralCache::GetStats() noexcept {
@@ -331,7 +339,7 @@ size_t CentralCache::DrainTransferCaches(size_t max_bytes) noexcept {
                 break;
             }
 
-            // `transfer_cache_begin` is the cold end; normal FetchRange pops
+            // `transfer_cache_begin` is the cold end; normal FetchBatch pops
             // from the logical end. A circular array avoids O(capacity) shifting
             // under this SpinLock while preserving the remaining LIFO order.
             for (size_t j = 0; j < detached; ++j) {

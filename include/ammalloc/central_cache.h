@@ -53,9 +53,9 @@ struct CentralCacheStats {
     /// report can distinguish owner-thread trims from ordinary overflow.
     std::atomic<size_t> spans_unpinned_by_direct_release{0};
     /// Cumulative objects popped directly from a bucket's TransferCache by
-    /// FetchRange without entering the SpanList mutex.
+    /// FetchBatch without entering the SpanList mutex.
     std::atomic<size_t> fetch_transfer_hit_objects{0};
-    /// Cumulative objects carved from Span bitmaps by FetchRange, including
+    /// Cumulative objects carved from Span bitmaps by FetchBatch, including
     /// the extra batch that is prefetched back into TransferCache.
     std::atomic<size_t> fetch_span_list_objects{0};
     /// Cumulative Spans successfully borrowed from PageCache by GetOneSpan
@@ -68,19 +68,19 @@ struct CentralCacheStats {
     /// ReleaseBatch, regardless of release mode.
     std::atomic<size_t> release_spans_returned_to_pagecache{0};
     /// Cumulative full-Span rotations (`erase` + `push_back`) performed by
-    /// FetchRange to keep partially free Spans near the SpanList head.
+    /// FetchBatch to keep partially free Spans near the SpanList head.
     std::atomic<size_t> spanlist_rotations{0};
-    /// Cumulative Span visits inside FetchRange's SpanList traversal loop,
+    /// Cumulative Span visits inside FetchBatch's SpanList traversal loop,
     /// including revisits after a rotation.
     std::atomic<size_t> spanlist_traversals{0};
 };
 
 #ifdef AMMALLOC_TEST
-// Test-only hook: when set to 0 < cap < batch_num, FetchRange returns at most
-// `cap` objects, forcing a partial refill at the ThreadCache layer.
-extern std::atomic<size_t> g_mock_fetch_range_cap;
+// Test-only hook: when set to 0 < cap < preferred_count, FetchBatch returns at
+// most `cap` objects, forcing a partial refill at the ThreadCache layer.
+extern std::atomic<size_t> g_mock_fetch_batch_cap;
 #else
-#define g_mock_fetch_range_cap (0)
+#define g_mock_fetch_batch_cap (0)
 #endif
 
 /// @brief Balances small objects between ThreadCache and PageCache.
@@ -138,17 +138,20 @@ public:
     CentralCache(const CentralCache&) = delete;
     CentralCache& operator=(const CentralCache&) = delete;
 
-    /// @brief Fetches a batch of objects to refill a ThreadCache.
-    /// @param free_list Destination list that receives fetched objects.
-    /// @param fetch_num Maximum number of objects to fetch.
-    /// @param aligned_size Size-class-aligned object size used to select the bucket.
-    /// @return Number of fetched objects, which may be smaller on allocation failure.
-    /// @pre `batch_num <= SizeClass::kMaxBatchSize`.
-    /// @pre `aligned_size` is an exact size-class boundary
-    ///      (`SizeClass::Size(SizeClass::Index(aligned_size)) == aligned_size`);
-    ///      Span::Init aborts otherwise in every build.
-    size_t FetchRange(FreeList& free_list, size_t fetch_num,
-                      size_t aligned_size) noexcept;
+    /// @brief Extracts up to `preferred_count` objects of one size class.
+    /// @param idx Size-class index selecting the bucket.
+    /// @param preferred_count Maximum number of objects to extract.
+    /// @return A canonical ObjectBatch owning the extracted chain. The result is
+    ///         partial on OOM or short supply (0 <= count < preferred_count) and
+    ///         an empty batch with the invalid-class sentinel when nothing is
+    ///         available; a partial batch is a normal result, not a failure.
+    /// @pre `idx < SizeClass::kNumSizeClasses`.
+    /// @pre `preferred_count <= SizeClass::kMaxBatchSize`.
+    /// @note Symmetric counterpart of ReleaseBatch: fetch hands ownership out as a
+    ///       move-only token that the caller (ThreadCache) routes into
+    ///       `free_lists_[idx]` via FreeList::PushBatch. Deriving the class size
+    ///       from `idx` internally removes the old aligned_size boundary contract.
+    AM_NODISCARD ObjectBatch FetchBatch(size_t idx, size_t preferred_count) noexcept;
 
     /// @brief Consumes a move-only object batch into the matching shared bucket.
     /// @param batch Ownership token for one detached chain; taken by value so the

@@ -234,12 +234,12 @@ BENCHMARK(BM_ThreadCache_CentralInteraction_PublicPurge16B)
         ->Teardown(TeardownPurgeStorm);
 
 #ifdef AMMALLOC_TEST
-// Forced partial refill: g_mock_fetch_range_cap caps every CentralCache
-// FetchRange so the owner thread's FreeList empties repeatedly and each refill
+// Forced partial refill: g_mock_fetch_batch_cap caps every CentralCache
+// FetchBatch so the owner thread's FreeList empties repeatedly and each refill
 // returns only `cap` objects. This isolates the partial-refill slow path that
 // a degraded or contended middle-end would impose on the front end.
 void TeardownForcedRefill(const benchmark::State&) {
-    g_mock_fetch_range_cap.store(0, std::memory_order_relaxed);
+    g_mock_fetch_batch_cap.store(0, std::memory_order_relaxed);
     am_thread_cache_purge();
     CentralCache::GetInstance().Reset();
     PageCache::GetInstance().Reset();
@@ -248,7 +248,7 @@ void TeardownForcedRefill(const benchmark::State&) {
 void BM_ThreadCache_CentralInteraction_ForcedRefill(benchmark::State& state) {
     // The cap is process-wide; set it from the benchmark body (Setup cannot
     // rely on range access) and clear it in Teardown.
-    g_mock_fetch_range_cap.store(static_cast<size_t>(state.range(0)),
+    g_mock_fetch_batch_cap.store(static_cast<size_t>(state.range(0)),
                                  std::memory_order_relaxed);
     ThreadCache tc;
     const size_t idx = SizeClass::Index(kObjSize);

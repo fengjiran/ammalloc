@@ -232,6 +232,13 @@ void ThreadCache::Trim(ThreadCacheTrimMode mode, size_t target_bytes) noexcept {
 void* ThreadCache::FetchFromCentralCache(size_t idx) noexcept {
     HandleGlobalTrimRequest();
     auto& list = free_lists_[idx];
+    // Refill is entered only after Allocate's fast path found this list empty; a
+    // non-empty list here would mean the fast path failed to Pop its own object.
+    AM_DCHECK(list.empty());
+
+    // aligned_size stays local: it feeds the batch size and quota policy below.
+    // Only the cross-module aligned_size->idx round trip is gone, since FetchBatch
+    // now takes the idx this function already holds.
     const auto aligned_size = SizeClass::Size(idx);
     const auto batch_num = SizeClass::CalculateBatchSize(aligned_size);
 
@@ -239,10 +246,15 @@ void* ThreadCache::FetchFromCentralCache(size_t idx) noexcept {
     // early refills small so cold size classes do not immediately hoard a full
     // batch in every thread.
     const auto fetch_num = std::min(batch_num, list.max_size());
-    const size_t fetched = CentralCache::GetInstance().FetchRange(list, fetch_num, aligned_size);
+    ObjectBatch batch = CentralCache::GetInstance().FetchBatch(idx, fetch_num);
+    const size_t fetched = batch.count();
     if (fetched == 0) {
         return nullptr;// CentralCache exhausted for this size class.
     }
+
+    // Route the fetched chain into free_lists_[idx]; the batch already carries its
+    // class, and AcceptFetchedBatch debug-checks it matches this slot.
+    AcceptFetchedBatch(idx, std::move(batch));
 
     // A partial refill signals memory pressure: hold the quota and the decay
     // signal so pressure does not feed back into larger subsequent requests.
@@ -260,6 +272,14 @@ void* ThreadCache::FetchFromCentralCache(size_t idx) noexcept {
 
     list.set_overages(0);
     return list.Pop();
+}
+
+void ThreadCache::AcceptFetchedBatch(size_t expected_idx, ObjectBatch batch) noexcept {
+    AM_DCHECK(expected_idx < SizeClass::kNumSizeClasses);
+    // A non-empty batch must carry the class this slot owns; an empty batch keeps
+    // the invalid-class sentinel and is a safe no-op inside PushBatch.
+    AM_DCHECK(batch.empty() || batch.size_class_idx() == expected_idx);
+    free_lists_[expected_idx].PushBatch(std::move(batch));
 }
 
 void ThreadCache::DeallocateSlowPath(size_t idx) noexcept {

@@ -273,6 +273,14 @@ private:
     ///        object size is derived as `SizeClass::Size(idx)`.
     AM_NOINLINE void* FetchFromCentralCache(size_t idx) noexcept;
 
+    /// @brief Routes a fetched batch into its owning size-class FreeList.
+    /// @param expected_idx Size-class slot that must own every object in `batch`.
+    /// @param batch Ownership token returned by CentralCache::FetchBatch.
+    /// @note Keeps routing identity in ThreadCache: the class-agnostic FreeList
+    ///       never stores idx, so this helper is the single place that binds a
+    ///       fetched batch to `free_lists_[idx]` and debug-checks the class match.
+    void AcceptFetchedBatch(size_t expected_idx, ObjectBatch batch) noexcept;
+
     /// @brief Trims one batch to CentralCache and applies quota decay.
     ///
     /// Repeated overflow trims without intervening refill demand reduce

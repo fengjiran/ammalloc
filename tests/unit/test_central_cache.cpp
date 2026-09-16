@@ -40,13 +40,26 @@ void ReleaseFreeListToBitmap(CentralCache& cache, FreeList& list, size_t size) {
                        CentralReleaseMode::kSpanBitmap);
 }
 
-// Point 1: basic FetchRange.
-TEST_F(CentralCacheTest, BasicFetchRange) {
+// Test helper: fetches up to `count` objects of `size` into `list` through the
+// FetchBatch + PushBatch path and returns how many were delivered. Mirrors the
+// retired fetch-into-list entry point so existing assertions on the
+// returned count and the resulting list state stay valid, while every fetched
+// batch is consumed by PushBatch (so no ObjectBatch leaks out to trip its
+// destructor assert).
+size_t FetchToList(CentralCache& cache, FreeList& list, size_t count, size_t size) {
+    ObjectBatch batch = cache.FetchBatch(SizeClass::Index(size), count);
+    const size_t fetched = batch.count();
+    list.PushBatch(std::move(batch));
+    return fetched;
+}
+
+// Point 1: basic FetchBatch.
+TEST_F(CentralCacheTest, BasicFetchBatch) {
     FreeList list;
     size_t obj_size = 16;
     size_t batch_num = 10;
 
-    size_t fetched = central_cache_.FetchRange(list, batch_num, obj_size);
+    size_t fetched = FetchToList(central_cache_, list, batch_num, obj_size);
 
     EXPECT_GT(fetched, 0);
     EXPECT_EQ(list.size(), fetched);
@@ -55,13 +68,39 @@ TEST_F(CentralCacheTest, BasicFetchRange) {
     central_cache_.ReleaseBatch(list.PopBatch(list.size(), SizeClass::Index(obj_size)));
 }
 
-// Point 2: repeated FetchRange calls.
-TEST_F(CentralCacheTest, MultipleFetchRange) {
+// FetchBatch is the sole fetch boundary after phase 2: verify the returned
+// ObjectBatch directly (count, class tag, canonical chain, consumption) instead
+// of only observing a destination FreeList through FetchToList.
+TEST_F(CentralCacheTest, FetchBatchYieldsCanonicalClassTaggedBatch) {
+    const size_t idx = SizeClass::Index(64);
+    ObjectBatch batch = central_cache_.FetchBatch(idx, 8);
+    ASSERT_FALSE(batch.empty());
+    EXPECT_EQ(batch.count(), 8u);
+    EXPECT_EQ(batch.size_class_idx(), idx);
+    EXPECT_NE(batch.head(), nullptr);
+    EXPECT_NE(batch.tail(), nullptr);
+
+    central_cache_.ReleaseBatch(std::move(batch), CentralReleaseMode::kSpanBitmap);
+    EXPECT_TRUE(batch.empty());
+}
+
+TEST_F(CentralCacheTest, FetchBatchZeroCountYieldsInvalidClassBatch) {
+    // preferred_count == 0 yields an empty batch with the invalid-class sentinel,
+    // never a partial token, matching the FetchBatch return contract.
+    ObjectBatch batch = central_cache_.FetchBatch(SizeClass::Index(64), 0);
+    EXPECT_TRUE(batch.empty());
+    EXPECT_EQ(batch.count(), 0u);
+    EXPECT_EQ(batch.size_class_idx(), SizeClass::kNumSizeClasses);
+    central_cache_.ReleaseBatch(std::move(batch));
+}
+
+// Point 2: repeated FetchBatch calls.
+TEST_F(CentralCacheTest, MultipleFetchBatch) {
     FreeList list;
     size_t obj_size = 32;
 
     for (int i = 0; i < 5; ++i) {
-        size_t fetched = central_cache_.FetchRange(list, 20, obj_size);
+        size_t fetched = FetchToList(central_cache_, list, 20, obj_size);
         EXPECT_GT(fetched, 0);
     }
 
@@ -78,14 +117,14 @@ TEST_F(CentralCacheTest, BasicReleaseBatch) {
     size_t batch_num = 10;
 
     // Fetch some objects first.
-    size_t fetched = central_cache_.FetchRange(list, batch_num, obj_size);
+    size_t fetched = FetchToList(central_cache_, list, batch_num, obj_size);
     ASSERT_GT(fetched, 0);
 
     // Return them to CentralCache.
     central_cache_.ReleaseBatch(list.PopBatch(list.size(), SizeClass::Index(obj_size)));
 
     // Verify: fetching again must succeed.
-    size_t fetched2 = central_cache_.FetchRange(list, batch_num, obj_size);
+    size_t fetched2 = FetchToList(central_cache_, list, batch_num, obj_size);
     EXPECT_GT(fetched2, 0);
 
     central_cache_.ReleaseBatch(list.PopBatch(list.size(), SizeClass::Index(obj_size)));
@@ -97,7 +136,7 @@ TEST_F(CentralCacheTest, DifferentSizeClasses) {
 
     for (size_t size: sizes) {
         FreeList list;
-        size_t fetched = central_cache_.FetchRange(list, 5, size);
+        size_t fetched = FetchToList(central_cache_, list, 5, size);
         EXPECT_GT(fetched, 0) << "Failed for size " << size;
 
         central_cache_.ReleaseBatch(list.PopBatch(list.size(), SizeClass::Index(size)));
@@ -110,7 +149,7 @@ TEST_F(CentralCacheTest, LargeBatchAllocation) {
     size_t obj_size = 128;
     size_t batch_num = 100;
 
-    size_t fetched = central_cache_.FetchRange(list, batch_num, obj_size);
+    size_t fetched = FetchToList(central_cache_, list, batch_num, obj_size);
     EXPECT_GT(fetched, 0);
 
     // Verify every object is valid, collecting into a list so the batch can be
@@ -133,7 +172,7 @@ TEST_F(CentralCacheTest, Reset) {
     size_t obj_size = 256;
 
     // Allocate some objects.
-    central_cache_.FetchRange(list, 10, obj_size);
+    FetchToList(central_cache_, list, 10, obj_size);
 
     // Drain the list.
     central_cache_.ReleaseBatch(list.PopBatch(list.size(), SizeClass::Index(obj_size)));
@@ -142,7 +181,7 @@ TEST_F(CentralCacheTest, Reset) {
     central_cache_.Reset();
 
     // Allocation must keep working afterwards.
-    size_t fetched = central_cache_.FetchRange(list, 10, obj_size);
+    size_t fetched = FetchToList(central_cache_, list, 10, obj_size);
     EXPECT_GT(fetched, 0);
 
     // Clean up.
@@ -160,7 +199,7 @@ TEST_F(CentralCacheTest, TransferCacheOomDegradesToSpanList) {
     g_mock_normal_alloc_fail.store(false, std::memory_order_relaxed);
 
     FreeList list;
-    ASSERT_GT(central_cache_.FetchRange(list, 1, 64), 0u);
+    ASSERT_GT(FetchToList(central_cache_, list, 1, 64), 0u);
     void* object = list.Pop();
     central_cache_.ReleaseBatch(ObjectBatch::FromSingleObject(object, SizeClass::Index(64)));
 }
@@ -169,13 +208,13 @@ TEST_F(CentralCacheTest, DirectBitmapReleaseUnpinsSpanWithoutTransferCache) {
     constexpr size_t kSize = 64;
     const size_t idx = SizeClass::Index(kSize);
     FreeList list;
-    ASSERT_EQ(central_cache_.FetchRange(list, 1, kSize), 1u);
+    ASSERT_EQ(FetchToList(central_cache_, list, 1, kSize), 1u);
     void* object = list.Pop();
     auto* span = PageMap::GetSpan(object);
     ASSERT_NE(span, nullptr);
     ASSERT_GT(central_cache_.GetTransferCacheCountForTest(idx), 0u);
 
-    // FetchRange prefetches one additional object. Drain it first, then return
+    // FetchBatch prefetches one additional object. Drain it first, then return
     // the caller's object through the direct path so the Span can reach zero.
     EXPECT_EQ(central_cache_.DrainTransferCaches(kSize), kSize);
     EXPECT_EQ(central_cache_.GetTransferCacheCountForTest(idx), 0u);
@@ -190,7 +229,7 @@ TEST_F(CentralCacheTest, TransferCacheDrainHonorsByteBudgetAndPreservesHealth) {
     constexpr size_t kSize = 64;
     const size_t idx = SizeClass::Index(kSize);
     FreeList list;
-    ASSERT_EQ(central_cache_.FetchRange(list, 1, kSize), 1u);
+    ASSERT_EQ(FetchToList(central_cache_, list, 1, kSize), 1u);
     void* object = list.Pop();
 
     ASSERT_EQ(central_cache_.GetTransferCacheCountForTest(idx), 1u);
@@ -203,7 +242,7 @@ TEST_F(CentralCacheTest, TransferCacheDrainHonorsByteBudgetAndPreservesHealth) {
                                 CentralReleaseMode::kSpanBitmap);
 
     FreeList verify;
-    EXPECT_GT(central_cache_.FetchRange(verify, 1, kSize), 0u);
+    EXPECT_GT(FetchToList(central_cache_, verify, 1, kSize), 0u);
     object = verify.Pop();
     central_cache_.ReleaseBatch(ObjectBatch::FromSingleObject(object, idx),
                                 CentralReleaseMode::kSpanBitmap);
@@ -214,7 +253,7 @@ TEST_F(CentralCacheTest, TransferCacheDrainPreservesLifoAcrossColdEndWrap) {
     constexpr size_t kSize = SizeConfig::MAX_TC_SIZE;
     const size_t idx = SizeClass::Index(kSize);
     FreeList first;
-    ASSERT_EQ(central_cache_.FetchRange(first, 8, kSize), 8u);
+    ASSERT_EQ(FetchToList(central_cache_, first, 8, kSize), 8u);
 
     central_cache_.ReleaseBatch(first.PopBatch(first.size(), idx));
     ASSERT_EQ(central_cache_.GetTransferCacheCountForTest(idx), 16u);
@@ -223,9 +262,9 @@ TEST_F(CentralCacheTest, TransferCacheDrainPreservesLifoAcrossColdEndWrap) {
     EXPECT_EQ(central_cache_.GetTransferCacheCountForTest(idx), 8u);
 
     FreeList second;
-    ASSERT_EQ(central_cache_.FetchRange(second, 4, kSize), 4u);
+    ASSERT_EQ(FetchToList(central_cache_, second, 4, kSize), 4u);
     FreeList third;
-    ASSERT_EQ(central_cache_.FetchRange(third, 8, kSize), 8u);
+    ASSERT_EQ(FetchToList(central_cache_, third, 8, kSize), 8u);
     // The second request leaves a cold-end offset; the third request needs a
     // Span refill and appends prefetched pointers across the circular boundary.
     ASSERT_GT(central_cache_.GetTransferCacheCountForTest(idx), 0u);
@@ -238,7 +277,7 @@ TEST_F(CentralCacheTest, TransferCacheDrainPreservesLifoAcrossColdEndWrap) {
     central_cache_.DrainTransferCaches(std::numeric_limits<size_t>::max());
 
     FreeList verify;
-    EXPECT_GT(central_cache_.FetchRange(verify, 1, kSize), 0u);
+    EXPECT_GT(FetchToList(central_cache_, verify, 1, kSize), 0u);
     void* object = verify.Pop();
     central_cache_.ReleaseBatch(ObjectBatch::FromSingleObject(object, idx),
                                 CentralReleaseMode::kSpanBitmap);
@@ -254,7 +293,7 @@ TEST_F(CentralCacheTest, ConcurrentTransferDrainDoesNotNestBucketLocks) {
         producer_ready.store(true, std::memory_order_release);
         for (size_t i = 0; i < kIterations; ++i) {
             FreeList list;
-            const size_t fetched = CentralCache::GetInstance().FetchRange(list, 8, kSize);
+            const size_t fetched = FetchToList(CentralCache::GetInstance(), list, 8, kSize);
             if (fetched > 0) {
                 CentralCache::GetInstance().ReleaseBatch(
                         list.PopBatch(list.size(), SizeClass::Index(kSize)));
@@ -281,14 +320,14 @@ TEST_F(CentralCacheTest, ReallocateAfterRelease) {
     size_t obj_size = 512;
 
     // First allocation.
-    size_t fetched1 = central_cache_.FetchRange(list, 20, obj_size);
+    size_t fetched1 = FetchToList(central_cache_, list, 20, obj_size);
     ASSERT_GT(fetched1, 0);
 
     // Release.
     central_cache_.ReleaseBatch(list.PopBatch(list.size(), SizeClass::Index(obj_size)));
 
     // Second allocation.
-    size_t fetched2 = central_cache_.FetchRange(list, 20, obj_size);
+    size_t fetched2 = FetchToList(central_cache_, list, 20, obj_size);
     ASSERT_GT(fetched2, 0);
 
     // Clean up.
@@ -309,7 +348,7 @@ TEST_F(CentralCacheTest, StressTest) {
 
         FreeList list;
         size_t batch_num = batch_dis(g);
-        size_t fetched = central_cache_.FetchRange(list, batch_num, obj_size);
+        size_t fetched = FetchToList(central_cache_, list, batch_num, obj_size);
 
         while (!list.empty()) {
             void* obj = list.Pop();
@@ -344,7 +383,7 @@ TEST_F(CentralCacheTest, MultiThreadedAllocation) {
             for (int i = 0; i < allocations_per_thread; ++i) {
                 FreeList list;
                 size_t obj_size = 64;
-                size_t fetched = CentralCache::GetInstance().FetchRange(list, 10, obj_size);
+                size_t fetched = FetchToList(CentralCache::GetInstance(), list, 10, obj_size);
                 if (fetched > 0) {
                     success_count.fetch_add(fetched);
                 }
@@ -372,7 +411,7 @@ TEST_F(CentralCacheTest, FreeListOperations) {
     // Exercise the list with real allocated memory.
     size_t obj_size = 64;
     FreeList source;
-    central_cache_.FetchRange(source, 5, obj_size);
+    FetchToList(central_cache_, source, 5, obj_size);
 
     // Push
     void* a = source.Pop();
@@ -402,7 +441,7 @@ TEST_F(CentralCacheTest, FreeListPushRange) {
 
     // Fetch objects from CentralCache.
     FreeList source;
-    central_cache_.FetchRange(source, 5, obj_size);
+    FetchToList(central_cache_, source, 5, obj_size);
 
     void* a = source.Pop();
     void* b = source.Pop();
@@ -445,7 +484,7 @@ TEST_F(CentralCacheTest, SmallObjectAllocation) {
     FreeList list;
     size_t obj_size = SizeClass::RoundUp(8);// 8 maps to the 16-byte class; the Span is carved at that class size.
 
-    size_t fetched = central_cache_.FetchRange(list, 50, obj_size);
+    size_t fetched = FetchToList(central_cache_, list, 50, obj_size);
     EXPECT_GT(fetched, 0);
 
     // Clean up.
@@ -458,18 +497,18 @@ TEST_F(CentralCacheTest, BoundarySizeAllocation) {
     size_t max_size = SizeConfig::MAX_TC_SIZE;
 
     FreeList list;
-    size_t fetched = central_cache_.FetchRange(list, 10, max_size);
+    size_t fetched = FetchToList(central_cache_, list, 10, max_size);
     EXPECT_GT(fetched, 0);
 
     // Clean up.
     central_cache_.ReleaseBatch(list.PopBatch(list.size(), SizeClass::Index(max_size)));
 }
 
-// FetchRange returns a partial batch when supply is short: one Span with a
+// FetchBatch returns a partial batch when supply is short: one Span with a
 // single free slot left and PageCache unable to refill (OOM) serve 15 of 16
 // requested objects. This is the partial-refill fact the ThreadCache quota
 // policy is built on (a partial refill must not grow the quota).
-TEST_F(CentralCacheTest, FetchRangeReturnsPartialOnShortSupply) {
+TEST_F(CentralCacheTest, FetchBatchReturnsPartialOnShortSupply) {
     // MAX_TC_SIZE class: batch == 2, span capacity 16, and the Span is exactly
     // the 128-page refill unit (no spare Span left in PageCache). Its mapping
     // (< 1 MiB) goes through AllocNormalPage, so the mock blocks new Span
@@ -479,7 +518,7 @@ TEST_F(CentralCacheTest, FetchRangeReturnsPartialOnShortSupply) {
 
     // Take one object: the only Span has `capacity - 1` free slots left.
     FreeList one;
-    ASSERT_EQ(central_cache_.FetchRange(one, 1, size), 1u);
+    ASSERT_EQ(FetchToList(central_cache_, one, 1, size), 1u);
     void* first = one.Pop();
     auto* span = PageMap::GetSpan(first);
     ASSERT_NE(span, nullptr);
@@ -490,7 +529,7 @@ TEST_F(CentralCacheTest, FetchRangeReturnsPartialOnShortSupply) {
     // full and the mocked PageCache cannot supply a new one.
     g_mock_normal_alloc_fail.store(true, std::memory_order_relaxed);
     FreeList list;
-    const size_t fetched = central_cache_.FetchRange(list, capacity, size);
+    const size_t fetched = FetchToList(central_cache_, list, capacity, size);
     g_mock_normal_alloc_fail.store(false, std::memory_order_relaxed);
 
     EXPECT_EQ(fetched, capacity - 1);
@@ -501,7 +540,7 @@ TEST_F(CentralCacheTest, FetchRangeReturnsPartialOnShortSupply) {
     central_cache_.ReleaseBatch(list.PopBatch(list.size(), SizeClass::Index(size)));
 }
 
-TEST_F(CentralCacheTest, FetchRangeUsesNextPartialSpanBeforePageCacheRefill) {
+TEST_F(CentralCacheTest, FetchBatchUsesNextPartialSpanBeforePageCacheRefill) {
     constexpr size_t kSpanCapacity = 16;
     const size_t size = SizeConfig::MAX_TC_SIZE;
 
@@ -510,9 +549,9 @@ TEST_F(CentralCacheTest, FetchRangeUsesNextPartialSpanBeforePageCacheRefill) {
     // TransferCache.
     FreeList first_span_objects;
     FreeList second_span_objects;
-    ASSERT_EQ(central_cache_.FetchRange(first_span_objects, kSpanCapacity, size),
+    ASSERT_EQ(FetchToList(central_cache_, first_span_objects, kSpanCapacity, size),
               kSpanCapacity);
-    ASSERT_EQ(central_cache_.FetchRange(second_span_objects, kSpanCapacity, size),
+    ASSERT_EQ(FetchToList(central_cache_, second_span_objects, kSpanCapacity, size),
               kSpanCapacity);
     ASSERT_EQ(central_cache_.GetTransferCacheCountForTest(SizeClass::Index(size)), 0u);
 
@@ -528,7 +567,7 @@ TEST_F(CentralCacheTest, FetchRangeUsesNextPartialSpanBeforePageCacheRefill) {
 
     g_mock_normal_alloc_fail.store(true, std::memory_order_relaxed);
     FreeList fetched_objects;
-    const size_t fetched = central_cache_.FetchRange(fetched_objects, 1, size);
+    const size_t fetched = FetchToList(central_cache_, fetched_objects, 1, size);
     g_mock_normal_alloc_fail.store(false, std::memory_order_relaxed);
 
     EXPECT_EQ(fetched, 1u);
@@ -541,15 +580,15 @@ TEST_F(CentralCacheTest, FetchRangeUsesNextPartialSpanBeforePageCacheRefill) {
     ReleaseFreeListToBitmap(central_cache_, fetched_objects, size);
 }
 
-TEST_F(CentralCacheTest, FetchRangeRotatesSpanFilledAtExtractionBoundary) {
+TEST_F(CentralCacheTest, FetchBatchRotatesSpanFilledAtExtractionBoundary) {
     constexpr size_t kSpanCapacity = 16;
     const size_t size = SizeConfig::MAX_TC_SIZE;
 
     FreeList first_span_objects;
     FreeList second_span_objects;
-    ASSERT_EQ(central_cache_.FetchRange(first_span_objects, kSpanCapacity, size),
+    ASSERT_EQ(FetchToList(central_cache_, first_span_objects, kSpanCapacity, size),
               kSpanCapacity);
-    ASSERT_EQ(central_cache_.FetchRange(second_span_objects, kSpanCapacity, size),
+    ASSERT_EQ(FetchToList(central_cache_, second_span_objects, kSpanCapacity, size),
               kSpanCapacity);
     ASSERT_EQ(central_cache_.GetTransferCacheCountForTest(SizeClass::Index(size)), 0u);
 
@@ -559,7 +598,7 @@ TEST_F(CentralCacheTest, FetchRangeRotatesSpanFilledAtExtractionBoundary) {
     ASSERT_NE(PageMap::GetSpan(first_free), PageMap::GetSpan(second_free_a));
     ASSERT_EQ(PageMap::GetSpan(second_free_a), PageMap::GetSpan(second_free_b));
 
-    // Put the Span with two free slots at the front. FetchRange(1) extracts
+    // Put the Span with two free slots at the front. FetchBatch(1) extracts
     // exactly two objects (caller + prefetch), so this Span becomes full at the
     // extraction boundary without a subsequent failed AllocObject probe.
     ReleaseOneToBitmap(central_cache_, first_free, size);
@@ -567,17 +606,17 @@ TEST_F(CentralCacheTest, FetchRangeRotatesSpanFilledAtExtractionBoundary) {
     ReleaseOneToBitmap(central_cache_, second_free_b, size);
 
     FreeList boundary_objects;
-    ASSERT_EQ(central_cache_.FetchRange(boundary_objects, 1, size), 1u);
+    ASSERT_EQ(FetchToList(central_cache_, boundary_objects, 1, size), 1u);
     ASSERT_EQ(central_cache_.GetTransferCacheCountForTest(SizeClass::Index(size)), 1u);
 
     // Consume the prefetched object without touching SpanList. The next slow
     // fetch must see the remaining partial Span before attempting PageCache.
     FreeList prefetched_objects;
-    ASSERT_EQ(central_cache_.FetchRange(prefetched_objects, 1, size), 1u);
+    ASSERT_EQ(FetchToList(central_cache_, prefetched_objects, 1, size), 1u);
 
     g_mock_normal_alloc_fail.store(true, std::memory_order_relaxed);
     FreeList remaining_candidate;
-    const size_t fetched = central_cache_.FetchRange(remaining_candidate, 1, size);
+    const size_t fetched = FetchToList(central_cache_, remaining_candidate, 1, size);
     g_mock_normal_alloc_fail.store(false, std::memory_order_relaxed);
 
     EXPECT_EQ(fetched, 1u);
@@ -600,8 +639,8 @@ TEST_F(CentralCacheTest, ReleaseBatchHandlesChainsLongerThanOneBatch) {
 
     FreeList first;
     FreeList second;
-    ASSERT_EQ(central_cache_.FetchRange(first, kBatch, kObjSize), kBatch);
-    ASSERT_EQ(central_cache_.FetchRange(second, kBatch, kObjSize), kBatch);
+    ASSERT_EQ(FetchToList(central_cache_, first, kBatch, kObjSize), kBatch);
+    ASSERT_EQ(FetchToList(central_cache_, second, kBatch, kObjSize), kBatch);
 
     // One chain twice as long as a single release batch.
     while (!second.empty()) {
@@ -624,8 +663,8 @@ TEST_F(CentralCacheTest, ReleaseBatchOverflowsToBitmapWhenTransferCacheIsFull) {
     FreeList first;
     FreeList second;
     constexpr size_t kHalf = kChainLength / 2;
-    ASSERT_EQ(central_cache_.FetchRange(first, kHalf, obj_size), kHalf);
-    ASSERT_EQ(central_cache_.FetchRange(second, kHalf, obj_size), kHalf);
+    ASSERT_EQ(FetchToList(central_cache_, first, kHalf, obj_size), kHalf);
+    ASSERT_EQ(FetchToList(central_cache_, second, kHalf, obj_size), kHalf);
 
     while (!second.empty()) {
         first.Push(second.Pop());
@@ -644,7 +683,7 @@ TEST_F(CentralCacheTest, ReleaseBatchOverflowsToBitmapWhenTransferCacheIsFull) {
 TEST_F(CentralCacheTest, TransferCacheDrainReportsBytesInStats) {
     constexpr size_t kObjSize = 64;
     FreeList list;
-    ASSERT_EQ(central_cache_.FetchRange(list, 1, kObjSize), 1u);
+    ASSERT_EQ(FetchToList(central_cache_, list, 1, kObjSize), 1u);
 
     const size_t before =
             CentralCache::GetStats().transfer_cache_drained_bytes.load(std::memory_order_relaxed);
@@ -664,7 +703,7 @@ TEST_F(CentralCacheTest, DirectBitmapReleaseCountsUnpinnedSpansInStats) {
     constexpr size_t kObjSize = 64;
     const size_t idx = SizeClass::Index(kObjSize);
     FreeList list;
-    ASSERT_EQ(central_cache_.FetchRange(list, 1, kObjSize), 1u);
+    ASSERT_EQ(FetchToList(central_cache_, list, 1, kObjSize), 1u);
     void* object = list.Pop();
 
     // Consume the prefetched sibling so the caller's object is the last pin.
@@ -685,7 +724,7 @@ TEST_F(CentralCacheTest, DirectBitmapReleaseCountsUnpinnedSpansInStats) {
 // before any bucket access could corrupt unrelated size classes.
 TEST_F(CentralCacheTest, FromSingleObjectRejectsOutOfRangeIndex) {
     FreeList list;
-    ASSERT_EQ(central_cache_.FetchRange(list, 1, 64), 1u);
+    ASSERT_EQ(FetchToList(central_cache_, list, 1, 64), 1u);
     void* object = list.Pop();
 
     // The factory guards the size-class range before any bucket access.
@@ -708,8 +747,8 @@ TEST_F(CentralCacheTest, DrainTransferCachesSpendsBudgetOnLargestClassFirst) {
 
     FreeList small_list;
     FreeList large_list;
-    ASSERT_EQ(central_cache_.FetchRange(small_list, 1, kSmallSize), 1u);
-    ASSERT_EQ(central_cache_.FetchRange(large_list, 1, large_size), 1u);
+    ASSERT_EQ(FetchToList(central_cache_, small_list, 1, kSmallSize), 1u);
+    ASSERT_EQ(FetchToList(central_cache_, large_list, 1, large_size), 1u);
     ASSERT_EQ(central_cache_.GetTransferCacheCountForTest(small_idx), 1u);
     ASSERT_EQ(central_cache_.GetTransferCacheCountForTest(large_idx), 1u);
 
@@ -726,7 +765,7 @@ TEST_F(CentralCacheTest, DrainTransferCachesWithZeroBudgetIsNoOp) {
     constexpr size_t kObjSize = 64;
     const size_t idx = SizeClass::Index(kObjSize);
     FreeList list;
-    ASSERT_EQ(central_cache_.FetchRange(list, 1, kObjSize), 1u);
+    ASSERT_EQ(FetchToList(central_cache_, list, 1, kObjSize), 1u);
 
     EXPECT_EQ(central_cache_.DrainTransferCaches(0), 0u);
     EXPECT_EQ(central_cache_.GetTransferCacheCountForTest(idx), 1u);
@@ -738,14 +777,14 @@ TEST_F(CentralCacheTest, DrainTransferCachesWithZeroBudgetIsNoOp) {
 // test teardown and controlled shutdown paths may call it back to back.
 TEST_F(CentralCacheTest, ResetIsIdempotent) {
     FreeList list;
-    ASSERT_GT(central_cache_.FetchRange(list, 8, 64), 0u);
+    ASSERT_GT(FetchToList(central_cache_, list, 8, 64), 0u);
     ReleaseFreeListToBitmap(central_cache_, list, 64);
 
     central_cache_.Reset();
     central_cache_.Reset();
 
     FreeList after;
-    EXPECT_GT(central_cache_.FetchRange(after, 8, 64), 0u);
+    EXPECT_GT(FetchToList(central_cache_, after, 8, 64), 0u);
     ReleaseFreeListToBitmap(central_cache_, after, 64);
 }
 
@@ -779,7 +818,7 @@ TEST(ObjectBatchTraits, IsMoveOnlyAndSmall) {
 TEST_F(ObjectBatchTest, FromSingleObjectYieldsConsumableBatch) {
     const size_t idx = SizeClass::Index(64);
     FreeList list;
-    ASSERT_EQ(central_cache_.FetchRange(list, 1, 64), 1u);
+    ASSERT_EQ(FetchToList(central_cache_, list, 1, 64), 1u);
     void* object = list.Pop();
 
     ObjectBatch batch = ObjectBatch::FromSingleObject(object, idx);
@@ -796,7 +835,7 @@ TEST_F(ObjectBatchTest, FromSingleObjectYieldsConsumableBatch) {
 TEST_F(ObjectBatchTest, MoveConstructionTransfersOwnershipAndEmptiesSource) {
     const size_t idx = SizeClass::Index(64);
     FreeList list;
-    ASSERT_EQ(central_cache_.FetchRange(list, 1, 64), 1u);
+    ASSERT_EQ(FetchToList(central_cache_, list, 1, 64), 1u);
     void* object = list.Pop();
 
     ObjectBatch source = ObjectBatch::FromSingleObject(object, idx);
@@ -815,7 +854,7 @@ TEST_F(ObjectBatchTest, MoveConstructionTransfersOwnershipAndEmptiesSource) {
 TEST_F(ObjectBatchTest, PopBatchTagsWholeListWithClass) {
     const size_t idx = SizeClass::Index(64);
     FreeList list;
-    ASSERT_EQ(central_cache_.FetchRange(list, 8, 64), 8u);
+    ASSERT_EQ(FetchToList(central_cache_, list, 8, 64), 8u);
 
     ObjectBatch batch = list.PopBatch(list.size(), idx);
     EXPECT_EQ(batch.count(), 8u);
@@ -828,7 +867,7 @@ TEST_F(ObjectBatchTest, PopBatchTagsWholeListWithClass) {
 TEST_F(ObjectBatchTest, PopBatchTailEvictsSuffixOnly) {
     const size_t idx = SizeClass::Index(64);
     FreeList list;
-    ASSERT_EQ(central_cache_.FetchRange(list, 8, 64), 8u);
+    ASSERT_EQ(FetchToList(central_cache_, list, 8, 64), 8u);
 
     ObjectBatch batch = list.PopBatchTail(3, idx);
     EXPECT_EQ(batch.count(), 3u);
@@ -855,7 +894,7 @@ TEST_F(ObjectBatchTest, EmptyListPopBatchYieldsEmptyBatch) {
 TEST_F(ObjectBatchTest, AdoptChainWrapsWellFormedChain) {
     const size_t idx = SizeClass::Index(64);
     FreeList list;
-    ASSERT_EQ(central_cache_.FetchRange(list, 4, 64), 4u);
+    ASSERT_EQ(FetchToList(central_cache_, list, 4, 64), 4u);
     // PopRange yields the canonical transport representation AdoptChain expects.
     const FreeChain chain = list.PopRange(list.size());
     ASSERT_EQ(chain.count, 4u);
@@ -881,13 +920,126 @@ TEST_F(ObjectBatchTest, AdoptChainEmptyYieldsInvalidClassBatch) {
     central_cache_.ReleaseBatch(std::move(batch));
 }
 
+TEST_F(ObjectBatchTest, PushBatchPrependsChainAndEmptiesSource) {
+    const size_t idx = SizeClass::Index(64);
+    FreeList source;
+    ASSERT_EQ(FetchToList(central_cache_, source, 4, 64), 4u);
+    ObjectBatch batch = source.PopBatch(source.size(), idx);
+    ASSERT_EQ(batch.count(), 4u);
+    void* const expected_head = batch.head();
+
+    FreeList dest;
+    dest.PushBatch(std::move(batch));
+
+    // PushBatch consumes the token and prepends the whole chain LIFO-first.
+    EXPECT_TRUE(batch.empty());
+    EXPECT_EQ(dest.size(), 4u);
+    EXPECT_EQ(dest.Pop(), expected_head);
+
+    central_cache_.ReleaseBatch(ObjectBatch::FromSingleObject(expected_head, idx),
+                                CentralReleaseMode::kSpanBitmap);
+    central_cache_.ReleaseBatch(dest.PopBatch(dest.size(), idx),
+                                CentralReleaseMode::kSpanBitmap);
+}
+
+TEST_F(ObjectBatchTest, PushBatchOntoNonEmptyListAccumulatesSize) {
+    const size_t idx = SizeClass::Index(64);
+    FreeList dest;
+    ASSERT_EQ(FetchToList(central_cache_, dest, 3, 64), 3u);
+
+    FreeList source;
+    ASSERT_EQ(FetchToList(central_cache_, source, 4, 64), 4u);
+    ObjectBatch batch = source.PopBatch(source.size(), idx);
+    void* const expected_head = batch.head();
+
+    dest.PushBatch(std::move(batch));
+
+    // The fetched chain lands in front of the objects dest already held.
+    EXPECT_TRUE(batch.empty());
+    EXPECT_EQ(dest.size(), 7u);
+    EXPECT_EQ(dest.Pop(), expected_head);
+
+    central_cache_.ReleaseBatch(ObjectBatch::FromSingleObject(expected_head, idx),
+                                CentralReleaseMode::kSpanBitmap);
+    central_cache_.ReleaseBatch(dest.PopBatch(dest.size(), idx),
+                                CentralReleaseMode::kSpanBitmap);
+}
+
+TEST_F(ObjectBatchTest, PushBatchEmptyIsNoOp) {
+    const size_t idx = SizeClass::Index(64);
+    FreeList dest;
+    ASSERT_EQ(FetchToList(central_cache_, dest, 2, 64), 2u);
+
+    ObjectBatch empty_batch;
+    dest.PushBatch(std::move(empty_batch));
+
+    EXPECT_TRUE(empty_batch.empty());
+    EXPECT_EQ(dest.size(), 2u);
+
+    central_cache_.ReleaseBatch(dest.PopBatch(dest.size(), idx),
+                                CentralReleaseMode::kSpanBitmap);
+}
+
+TEST_F(ObjectBatchTest, DetachChainForTransportEmptyYieldsEmptyChain) {
+    ObjectBatch batch;
+    const FreeChain chain = std::move(batch).DetachChainForTransport();
+    EXPECT_EQ(chain.count, 0u);
+    EXPECT_EQ(chain.head, nullptr);
+    EXPECT_EQ(chain.tail, nullptr);
+    EXPECT_TRUE(batch.empty());
+}
+
+TEST_F(ObjectBatchTest, DetachChainForTransportPreservesChainAndEmptiesSource) {
+    const size_t idx = SizeClass::Index(64);
+    FreeList list;
+    ASSERT_EQ(FetchToList(central_cache_, list, 4, 64), 4u);
+    ObjectBatch batch = list.PopBatch(list.size(), idx);
+    void* const expected_head = batch.head();
+    void* const expected_tail = batch.tail();
+
+    const FreeChain chain = std::move(batch).DetachChainForTransport();
+
+    // The token degrades to a copyable chain and the source is left empty, so it
+    // can never be consumed a second time.
+    EXPECT_TRUE(batch.empty());
+    EXPECT_EQ(chain.count, 4u);
+    EXPECT_EQ(chain.head, expected_head);
+    EXPECT_EQ(chain.tail, expected_tail);
+
+    central_cache_.ReleaseBatch(ObjectBatch::AdoptChain(chain, idx),
+                                CentralReleaseMode::kSpanBitmap);
+}
+
+TEST_F(ObjectBatchTest, DetachAdoptRoundTripPreservesChain) {
+    const size_t idx = SizeClass::Index(64);
+    FreeList list;
+    ASSERT_EQ(FetchToList(central_cache_, list, 6, 64), 6u);
+    ObjectBatch original = list.PopBatch(list.size(), idx);
+    void* const head = original.head();
+    void* const tail = original.tail();
+    const size_t count = original.count();
+
+    // token -> transport -> token must be lossless across the queue boundary.
+    const FreeChain chain = std::move(original).DetachChainForTransport();
+    ObjectBatch round_tripped = ObjectBatch::AdoptChain(chain, idx);
+
+    EXPECT_TRUE(original.empty());
+    EXPECT_EQ(round_tripped.count(), count);
+    EXPECT_EQ(round_tripped.head(), head);
+    EXPECT_EQ(round_tripped.tail(), tail);
+    EXPECT_EQ(round_tripped.size_class_idx(), idx);
+
+    central_cache_.ReleaseBatch(std::move(round_tripped),
+                                CentralReleaseMode::kSpanBitmap);
+}
+
 #ifndef NDEBUG
 // A forgotten release must be caught: the destructor asserts the batch is empty,
 // so letting a non-empty batch leave scope aborts in debug builds.
 TEST_F(ObjectBatchTest, UnconsumedNonEmptyBatchAbortsOnDestruction) {
     const size_t idx = SizeClass::Index(64);
     FreeList list;
-    ASSERT_EQ(central_cache_.FetchRange(list, 1, 64), 1u);
+    ASSERT_EQ(FetchToList(central_cache_, list, 1, 64), 1u);
     void* object = list.Pop();
 
     EXPECT_DEATH(
@@ -920,7 +1072,7 @@ TEST_F(ObjectBatchTest, AdoptChainRejectsOutOfRangeIndex) {
 TEST_F(ObjectBatchTest, AdoptChainRejectsCountMismatch) {
     const size_t idx = SizeClass::Index(64);
     FreeList list;
-    ASSERT_EQ(central_cache_.FetchRange(list, 2, 64), 2u);
+    ASSERT_EQ(FetchToList(central_cache_, list, 2, 64), 2u);
     const FreeChain chain = list.PopRange(list.size());
     // Overstate count so the canonical walk runs off the terminated chain end.
     EXPECT_DEATH(ObjectBatch::AdoptChain(FreeChain{chain.head, chain.tail, 5}, idx),
@@ -932,7 +1084,7 @@ TEST_F(ObjectBatchTest, AdoptChainRejectsCountMismatch) {
 TEST_F(ObjectBatchTest, AdoptChainRejectsUnreachableTail) {
     const size_t idx = SizeClass::Index(64);
     FreeList list;
-    ASSERT_EQ(central_cache_.FetchRange(list, 2, 64), 2u);
+    ASSERT_EQ(FetchToList(central_cache_, list, 2, 64), 2u);
     const FreeChain chain = list.PopRange(list.size());
     // A null tail with a non-zero count is unreachable.
     EXPECT_DEATH(ObjectBatch::AdoptChain(FreeChain{chain.head, nullptr, 2}, idx),
@@ -944,7 +1096,7 @@ TEST_F(ObjectBatchTest, AdoptChainRejectsUnreachableTail) {
 TEST_F(ObjectBatchTest, AdoptChainRejectsUnterminatedTail) {
     const size_t idx = SizeClass::Index(64);
     FreeList list;
-    ASSERT_EQ(central_cache_.FetchRange(list, 2, 64), 2u);
+    ASSERT_EQ(FetchToList(central_cache_, list, 2, 64), 2u);
     const FreeChain chain = list.PopRange(list.size());
     // Claim a 1-object chain ending at head, but head->next is still linked.
     EXPECT_DEATH(ObjectBatch::AdoptChain(FreeChain{chain.head, chain.head, 1}, idx),

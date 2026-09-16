@@ -270,11 +270,15 @@ void DrainAllTransferCaches() {
 }
 
 bool FetchExact(FreeList& list, size_t count, size_t size) {
-    if (GetCentralCache().FetchRange(list, count, size) == count) {
+    ObjectBatch batch = GetCentralCache().FetchBatch(SizeClass::Index(size), count);
+    const size_t fetched = batch.count();
+    list.PushBatch(std::move(batch));
+    if (fetched == count) {
         return true;
     }
-    // A short batch still transfers ownership of the returned prefix.  Restore
-    // it before reporting a failed scenario so no later benchmark observes it.
+    // A short batch still transferred ownership of the returned prefix into
+    // `list`. Restore it before reporting a failed scenario so no later
+    // benchmark observes it.
     ReleaseFreeList(list, size, CentralReleaseMode::kSpanBitmap);
     DrainAllTransferCaches();
     return false;
@@ -310,7 +314,7 @@ bool PrepareFetchHit(size_t size, size_t request) {
     if (!FetchExact(caller, request, size)) {
         return false;
     }
-    // Keep only FetchRange's prefetched objects in TransferCache.
+    // Keep only FetchBatch's prefetched objects in TransferCache.
     ReleaseFreeList(caller, size, CentralReleaseMode::kSpanBitmap);
     return GetCentralCache().GetTransferCacheCountForTest(SizeClass::Index(size)) == request;
 }
@@ -457,19 +461,24 @@ void BM_CentralCache_Fetch_TransferHit(benchmark::State& state) {
         return;
     }
 
+    const size_t idx = SizeClass::Index(size);
     const auto before = SnapshotStats();
     int64_t fetched_objects = 0;
     for (auto _: state) {
-        FreeList caller;
-        if (!FetchExact(caller, request, size)) {
+        // Timed region holds only CentralCache::FetchBatch (the phase-2 boundary).
+        // PushBatch is a frontend cost measured by ThreadCache_CentralInteraction_*;
+        // cleanup runs paused, so neither pollutes this CentralCache fetch metric.
+        ObjectBatch batch = GetCentralCache().FetchBatch(idx, request);
+        if (batch.count() != request) {
+            GetCentralCache().ReleaseBatch(std::move(batch), CentralReleaseMode::kSpanBitmap);
             state.SkipWithError("TransferCache hit returned a short batch");
             break;
         }
-        fetched_objects += static_cast<int64_t>(request);
+        fetched_objects += static_cast<int64_t>(batch.count());
 
         state.PauseTiming();
         prep.Begin();
-        ReleaseFreeList(caller, size, CentralReleaseMode::kTransferCache);
+        GetCentralCache().ReleaseBatch(std::move(batch), CentralReleaseMode::kTransferCache);
         prep.End();
         state.ResumeTiming();
     }
@@ -488,19 +497,21 @@ void BM_CentralCache_Fetch_PartialTransferAndSpan(benchmark::State& state) {
         return;
     }
 
+    const size_t idx = SizeClass::Index(size);
     const auto before = SnapshotStats();
     int64_t fetched_objects = 0;
     for (auto _: state) {
-        FreeList caller;
-        if (!FetchExact(caller, request, size)) {
+        ObjectBatch batch = GetCentralCache().FetchBatch(idx, request);
+        if (batch.count() != request) {
+            GetCentralCache().ReleaseBatch(std::move(batch), CentralReleaseMode::kSpanBitmap);
             state.SkipWithError("partial TransferCache fetch returned a short batch");
             break;
         }
-        fetched_objects += static_cast<int64_t>(request);
+        fetched_objects += static_cast<int64_t>(batch.count());
 
         state.PauseTiming();
         prep.Begin();
-        ReleaseFreeList(caller, size, CentralReleaseMode::kSpanBitmap);
+        GetCentralCache().ReleaseBatch(std::move(batch), CentralReleaseMode::kSpanBitmap);
         DrainAllTransferCaches();
         if (!SeedPartialTransferCache(size, partial)) {
             prep.End();
@@ -527,19 +538,21 @@ void BM_CentralCache_Fetch_ExistingSpan(benchmark::State& state) {
         return;
     }
 
+    const size_t idx = SizeClass::Index(size);
     const auto before = SnapshotStats();
     int64_t fetched_objects = 0;
     for (auto _: state) {
-        FreeList caller;
-        if (!FetchExact(caller, request, size)) {
+        ObjectBatch batch = GetCentralCache().FetchBatch(idx, request);
+        if (batch.count() != request) {
+            GetCentralCache().ReleaseBatch(std::move(batch), CentralReleaseMode::kSpanBitmap);
             state.SkipWithError("existing SpanList fetch returned a short batch");
             break;
         }
-        fetched_objects += static_cast<int64_t>(request);
+        fetched_objects += static_cast<int64_t>(batch.count());
 
         state.PauseTiming();
         prep.Begin();
-        ReleaseFreeList(caller, size, CentralReleaseMode::kSpanBitmap);
+        GetCentralCache().ReleaseBatch(std::move(batch), CentralReleaseMode::kSpanBitmap);
         DrainAllTransferCaches();
         prep.End();
         state.ResumeTiming();
@@ -562,21 +575,23 @@ void BM_CentralCache_Fetch_PageCacheReuse(benchmark::State& state) {
     ReleaseFreeList(primed, size, CentralReleaseMode::kSpanBitmap);
     DrainAllTransferCaches();
 
+    const size_t idx = SizeClass::Index(size);
     const auto before = SnapshotStats();
     int64_t fetched_objects = 0;
     for (auto _: state) {
-        FreeList caller;
-        if (!FetchExact(caller, request, size)) {
+        ObjectBatch batch = GetCentralCache().FetchBatch(idx, request);
+        if (batch.count() != request) {
+            GetCentralCache().ReleaseBatch(std::move(batch), CentralReleaseMode::kSpanBitmap);
             state.SkipWithError("PageCache reuse fetch returned a short batch");
             break;
         }
-        fetched_objects += static_cast<int64_t>(request);
+        fetched_objects += static_cast<int64_t>(batch.count());
 
         // Direct release plus drain empties the Span, so the next timed fetch
         // must leave CentralCache and acquire a Span from PageCache again.
         state.PauseTiming();
         prep.Begin();
-        ReleaseFreeList(caller, size, CentralReleaseMode::kSpanBitmap);
+        GetCentralCache().ReleaseBatch(std::move(batch), CentralReleaseMode::kSpanBitmap);
         DrainAllTransferCaches();
         prep.End();
         state.ResumeTiming();
@@ -589,22 +604,24 @@ void BM_CentralCache_Fetch_PageAllocatorFallback(benchmark::State& state) {
     const size_t size = static_cast<size_t>(state.range(0));
     const size_t request = static_cast<size_t>(state.range(1));
     PrepGuard prep;
+    const size_t idx = SizeClass::Index(size);
     const auto before = SnapshotStats();
     int64_t fetched_objects = 0;
     for (auto _: state) {
-        FreeList caller;
-        if (!FetchExact(caller, request, size)) {
+        ObjectBatch batch = GetCentralCache().FetchBatch(idx, request);
+        if (batch.count() != request) {
+            GetCentralCache().ReleaseBatch(std::move(batch), CentralReleaseMode::kSpanBitmap);
             state.SkipWithError("PageAllocator fallback fetch returned a short batch");
             break;
         }
-        fetched_objects += static_cast<int64_t>(request);
+        fetched_objects += static_cast<int64_t>(batch.count());
 
         state.PauseTiming();
         prep.Begin();
-        ReleaseFreeList(caller, size, CentralReleaseMode::kSpanBitmap);
+        GetCentralCache().ReleaseBatch(std::move(batch), CentralReleaseMode::kSpanBitmap);
         DrainAllTransferCaches();
         // All objects are back in PageCache before Reset removes its reusable
-        // Span, making the next FetchRange exercise PageAllocator again.
+        // Span, making the next FetchBatch exercise PageAllocator again.
         PageCache::GetInstance().Reset();
         prep.End();
         state.ResumeTiming();
@@ -628,11 +645,13 @@ void BM_CentralCache_Fetch_FragmentedSpans(benchmark::State& state) {
         return;
     }
 
+    const size_t idx = SizeClass::Index(size);
     const auto before = SnapshotStats();
     int64_t fetched_objects = 0;
     for (auto _: state) {
-        FreeList caller;
-        if (!FetchExact(caller, 1, size)) {
+        ObjectBatch batch = GetCentralCache().FetchBatch(idx, 1);
+        if (batch.count() != 1) {
+            GetCentralCache().ReleaseBatch(std::move(batch), CentralReleaseMode::kSpanBitmap);
             state.SkipWithError("fragmented SpanList fetch returned a short batch");
             break;
         }
@@ -640,7 +659,7 @@ void BM_CentralCache_Fetch_FragmentedSpans(benchmark::State& state) {
 
         state.PauseTiming();
         prep.Begin();
-        ReleaseFreeList(caller, size, CentralReleaseMode::kSpanBitmap);
+        GetCentralCache().ReleaseBatch(std::move(batch), CentralReleaseMode::kSpanBitmap);
         DrainAllTransferCaches();
         prep.End();
         state.ResumeTiming();
@@ -1283,23 +1302,24 @@ void BM_CentralCache_CrossThread_SpscHandoff(benchmark::State& state) {
     int64_t transferred_objects = 0;
     for (auto _: state) {
         if (state.thread_index() == 0) {
-            FreeList caller;
-            const size_t fetched =
-                    GetCentralCache().FetchRange(caller, kSpscBatchSize, kSpscObjectSize);
-            if (fetched != kSpscBatchSize) {
+            ObjectBatch batch = GetCentralCache().FetchBatch(
+                    SizeClass::Index(kSpscObjectSize), kSpscBatchSize);
+            if (batch.count() != kSpscBatchSize) {
                 // A short fetch still owns the returned prefix; release it so the
                 // failure path cannot leak objects or pin their Span. This runs
                 // only on the error exit, so it never pollutes normal timing.
-                GetCentralCache().ReleaseBatch(
-                        caller.PopBatch(caller.size(), SizeClass::Index(kSpscObjectSize)),
-                        CentralReleaseMode::kSpanBitmap);
+                GetCentralCache().ReleaseBatch(std::move(batch),
+                                               CentralReleaseMode::kSpanBitmap);
                 spsc_queue.Push(TransferRecord{});
                 state.SkipWithError("SPSC producer fetch returned a short batch");
                 break;
             }
-            spsc_queue.Push(TransferRecord{DetachFreeList(caller),
-                                           SizeClass::Index(kSpscObjectSize)});
-            transferred_objects += static_cast<int64_t>(fetched);
+            // Hand the batch across as a copyable transport record: detach is O(1)
+            // (no destination FreeList round trip) and the class travels with it.
+            const size_t batch_idx = batch.size_class_idx();
+            spsc_queue.Push(TransferRecord{std::move(batch).DetachChainForTransport(),
+                                           batch_idx});
+            transferred_objects += static_cast<int64_t>(kSpscBatchSize);
         } else {
             const TransferRecord record = spsc_queue.Pop();
             if (record.chain.count != kSpscBatchSize) {
@@ -1436,22 +1456,22 @@ void RunHandoffWithQueue(benchmark::State& state, MpmcTransferQueue<Capacity>& q
     for (auto _: state) {
         for (int b = 0; b < batches_per_iter; ++b) {
             if (is_producer) {
-                FreeList caller;
-                const size_t fetched =
-                        GetCentralCache().FetchRange(caller, kSpscBatchSize, kSpscObjectSize);
-                if (fetched != kSpscBatchSize) {
+                ObjectBatch batch = GetCentralCache().FetchBatch(
+                        SizeClass::Index(kSpscObjectSize), kSpscBatchSize);
+                if (batch.count() != kSpscBatchSize) {
                     // Release the short batch's owned prefix before bailing so the
                     // failure path cannot leak objects or pin their Span.
-                    GetCentralCache().ReleaseBatch(
-                            caller.PopBatch(caller.size(), SizeClass::Index(kSpscObjectSize)),
-                            CentralReleaseMode::kSpanBitmap);
+                    GetCentralCache().ReleaseBatch(std::move(batch),
+                                                   CentralReleaseMode::kSpanBitmap);
                     queue.Push(TransferRecord{});
                     state.SkipWithError("handoff producer fetch returned a short batch");
                     break;
                 }
-                queue.Push(TransferRecord{DetachFreeList(caller),
-                                          SizeClass::Index(kSpscObjectSize)});
-                transferred_objects += static_cast<int64_t>(fetched);
+                // O(1) detach into the transport record; no destination FreeList.
+                const size_t batch_idx = batch.size_class_idx();
+                queue.Push(TransferRecord{std::move(batch).DetachChainForTransport(),
+                                          batch_idx});
+                transferred_objects += static_cast<int64_t>(kSpscBatchSize);
             } else {
                 const TransferRecord record = queue.Pop();
                 if (record.chain.count != kSpscBatchSize) {
@@ -1536,21 +1556,24 @@ void SetupSpanOnlyFetch(const benchmark::State& state) {
 void BM_CentralCache_Fetch_SpanOnlyFallback(benchmark::State& state) {
     const size_t size = static_cast<size_t>(state.range(0));
     const size_t request = static_cast<size_t>(state.range(1));
+    const size_t idx = SizeClass::Index(size);
     PrepGuard prep;
     const auto before = SnapshotStats();
     int64_t fetched_objects = 0;
     for (auto _: state) {
-        FreeList caller;
-        const size_t fetched = GetCentralCache().FetchRange(caller, request, size);
-        if (fetched != request) {
+        // Timed region holds only the fetch itself; the batch is released in the
+        // paused region so cleanup never pollutes the measurement.
+        ObjectBatch batch = GetCentralCache().FetchBatch(idx, request);
+        if (batch.count() != request) {
+            GetCentralCache().ReleaseBatch(std::move(batch), CentralReleaseMode::kSpanBitmap);
             state.SkipWithError("SpanList-only fetch returned a short batch");
             break;
         }
-        fetched_objects += static_cast<int64_t>(fetched);
+        fetched_objects += static_cast<int64_t>(batch.count());
 
         state.PauseTiming();
         prep.Begin();
-        ReleaseFreeList(caller, size, CentralReleaseMode::kSpanBitmap);
+        GetCentralCache().ReleaseBatch(std::move(batch), CentralReleaseMode::kSpanBitmap);
         prep.End();
         state.ResumeTiming();
     }

@@ -144,10 +144,10 @@ int ModeDegradedNoTransferCache(size_t iters) {
 }
 
 // ---------- Mode: degraded_partial_fetch ----------
-// Caps every CentralCache FetchRange at `cap` objects so the front end refills
+// Caps every CentralCache FetchBatch at `cap` objects so the front end refills
 // in small slices, then measures steady-state alloc/free throughput.
 int ModeDegradedPartialFetch(size_t iters, size_t cap) {
-    g_mock_fetch_range_cap.store(cap, std::memory_order_relaxed);
+    g_mock_fetch_batch_cap.store(cap, std::memory_order_relaxed);
 
     std::vector<void*> objs(256, nullptr);
     const auto t0 = Clock::now();
@@ -164,7 +164,7 @@ int ModeDegradedPartialFetch(size_t iters, size_t cap) {
         }
     }
     const double elapsed_us = UsSince(t0);
-    g_mock_fetch_range_cap.store(0, std::memory_order_relaxed);
+    g_mock_fetch_batch_cap.store(0, std::memory_order_relaxed);
     const double total_ops = static_cast<double>(iters * objs.size());
     std::printf("mode=degraded_partial_fetch cap=%zu iters=%zu success=%zu ns_per_op=%.3f\n",
                 cap, iters, success, (elapsed_us * 1000.0) / total_ops);
