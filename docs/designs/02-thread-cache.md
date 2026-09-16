@@ -14,7 +14,7 @@ ThreadCache 是分配器的前端缓存：每个线程一个 TLS 实例，处理
 
 - **提供**：`Allocate`/`Deallocate`（快路径）+ `ReleaseAll`（TLS 销毁时全量归还）。
 
-- **请求**：`CentralCache::FetchRange`（refill）、`CentralCache::ReleaseBatch`（trim/全量归还）。
+- **请求**：`CentralCache::FetchBatch`（refill）、`CentralCache::ReleaseBatch`（trim/全量归还）。
 
 - **所有权**：FreeList 中的对象所有权始终属于分配器系统；ThreadCache 只是借用。TLS 析构时 `ReleaseAll` 把全部对象归还 CentralCache 后再销毁 ThreadCache 元数据（`PageAllocator::SystemFree`）。
 
@@ -126,7 +126,7 @@ return {current, overages + 1};                                             // �
 - quota 增长前检查 `reserved_quota_bytes + delta <= cache_budget_bytes`；预算不足只拒绝
   增长，不把正常 allocation 伪装成 OOM。
 
-- `FetchRange` 返回 0 表示 OOM，`Allocate` 返回 `nullptr`。
+- `FetchBatch` 返回空批（count 0）表示 OOM，`Allocate` 返回 `nullptr`。
 
 ### 6.3 Trim（DeallocateSlowPath，慢路径）
 
@@ -247,7 +247,7 @@ Trim 的三条硬性语义：
 
 - `Allocate` / `Deallocate` 快路径：O(1)。
 
-- Refill 慢路径：O(batch)，取货量与 `FetchRange` 搬运均以 `batch` 为界。
+- Refill 慢路径：O(batch)，取货量与 `FetchBatch` 搬运均以 `batch` 为界。
 
 - **Trim 慢路径：O(`max_size`)，不是 O(1)。** `Deallocate` 先 `Push` 再判 `size() > max_size()`，故进入时链深恰为 `max_size + 1`；`PopRangeTail(batch)` 归还的对象数受 `batch` 有界，但**定位驱逐点需要走完整条链**（≈ `size_ - 2` 步串行依赖 load），此外还要走完后缀求尾。"每事件 ≤ 1 batch" 只约束搬运对象数，不约束遍历代价。
 
@@ -386,7 +386,7 @@ ThreadCache 的容量限制不是一段独立的策略代码，而是**五道分
 
 - `size=0`：映射到最小尺寸类别（`Index(0)=0`）。
 
-- `FetchRange` 返回 0：表示 OOM，`Allocate` 返回 nullptr。
+- `FetchBatch` 返回空批（count 0）：表示 OOM，`Allocate` 返回 nullptr。
 
 - overflow decay 不会把已经增长到 batch 的 quota 降到一个 batch 以下；冷类别可保持初始
   quota 1，显式 hard trim 也会把 quota 重置为 1。
@@ -431,7 +431,7 @@ ThreadCache 的容量限制不是一段独立的策略代码，而是**五道分
 
 - **关联代码**: [include/ammalloc/thread\_cache.h](../../include/ammalloc/thread_cache.h) / [src/thread\_cache.cpp](../../src/thread_cache.cpp) / [include/ammalloc/free\_list.h](../../include/ammalloc/free_list.h)（`FreeList`/`FreeBlock`）
 
-- **上游依赖**: `SizeClass`（Index/Size/CalculateBatchSize）、`CentralCache`（FetchRange/ReleaseBatch）
+- **上游依赖**: `SizeClass`（Index/Size/CalculateBatchSize）、`CentralCache`（FetchBatch/ReleaseBatch）
 
 - **下游消费者**: `ammalloc.cpp`（`am_malloc`/`am_free` 主入口）
 

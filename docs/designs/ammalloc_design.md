@@ -225,7 +225,7 @@ void  am_free(void* ptr);
               └───┬───────────┘  └─┬─────────────────┘
                   │                │ miss → FetchFromCentralCache
                   │           ┌────▼─────────────────┐
-                  │           │ CentralCache.FetchRange│
+                  │           │ CentralCache.FetchBatch│
                   │           │  ├ TransferCache (SpinLock)
                   │           │  └ SpanList (Mutex + Bitmap)
                   │           └────┬─────────────────┘
@@ -497,7 +497,7 @@ class alignas(CACHE_LINE_SIZE) ThreadCache {
 
 #### 5.2.3 关键操作
 
-- **`FetchRange(block_list, batch_num, aligned_size)`**：先从 TransferCache 抓取（SpinLock 短临界区），不足部分再从 SpanList 的 Span 上按 bitmap 切分对象；两阶段返回总数可能小于请求数。
+- **`FetchBatch(idx, preferred_count)`**：先从 TransferCache 抓取（SpinLock 短临界区），不足部分再从 SpanList 的 Span 上按 bitmap 切分对象；两阶段组装成 move-only `ObjectBatch` 返回，其 count 可能小于请求数（OOM 或 Span 不足）。
 
 - **`ReleaseBatch(batch, mode)`**：消费 move-only `ObjectBatch`（封装 head/tail/count/size_class_idx，以 `count` 为处理边界），对象链先入 TransferCache，溢出时逐个归还所属 Span bitmap（`Span::FreeObject`）。
 
@@ -866,7 +866,7 @@ PageHeapScavenger 线程（jthread，1s 周期）
 | 连续内存布局     | TransferCache backing、ObjectPool chunk                               | 减少 TLB miss              |
 | 分支预测       | `[[likely]]/[[unlikely]]`（AM\_LIKELY/AM\_UNLIKELY）                   | 热路径流水线优化                 |
 | 内联分工       | `AM_ALWAYS_INLINE` 快路径 / `AM_NOINLINE` 冷路径                           | 消除调用开销且不污染 I-cache       |
-| 批量搬运       | FetchRange / ReleaseBatch                                      | 摊薄锁开销，Span 一次服务多次 refill |
+| 批量搬运       | FetchBatch / ReleaseBatch                                      | 摊薄锁开销，Span 一次服务多次 refill |
 | Relaxed 统计 | `PageAllocatorStats` 计数器                                             | 观测不阻塞热路径                 |
 | 惰性初始化      | RuntimeConfig/PageCache/Scavenger 静态存储 + placement new               | 避免单例构造递归                 |
 
