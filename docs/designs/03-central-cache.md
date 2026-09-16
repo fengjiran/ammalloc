@@ -5,7 +5,7 @@
 - **日期**: 2026-08-19
 - **关联代码**: [include/ammalloc/central_cache.h](../../include/ammalloc/central_cache.h) / [src/central_cache.cpp](../../src/central_cache.cpp) / [include/ammalloc/spin_lock.h](../../include/ammalloc/spin_lock.h)
 - **上游依赖**: `SizeClass`（batch/span 页数策略）、`FreeList`（FetchRange 批量传输容器）、`PageCache`（AllocSpan/ReleaseSpan）、`PageMap`（`GetSpan`）、`PageAllocator`（TransferCache backing）
-- **下游消费者**: `ThreadCache`（FetchRange/ReleaseListToSpans）
+- **下游消费者**: `ThreadCache`（FetchRange/ReleaseBatch）
 - **关联测试**: [tests/unit/test_central_cache.cpp](../../tests/unit/test_central_cache.cpp)
 - **架构总览**: [ammalloc_design.md §5.2](ammalloc_design.md)
 
@@ -18,7 +18,7 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 
 ## 2. 职责与边界
 
-- **提供**：`FetchRange`（向 ThreadCache 供批）、`ReleaseListToSpans`（回收对象链）。
+- **提供**：`FetchRange`（向 ThreadCache 供批）、`ReleaseBatch`（消费 move-only `ObjectBatch` 回收对象链）。
 - **请求**：`PageCache::AllocSpan` / `PageCache::ReleaseSpan`；`PageMap::GetSpan`（释放时定位归属 Span）。
 - **所有权**：Span 元数据归 PageCache 所有，CentralCache 桶只借用（`span_list` 为借用链表）；对象的所有权按 bitmap 记录归 Span。
 - **TransferCache 初始化**：构造时尝试一次性从 `PageAllocator::SystemAlloc` 申请连续 backing，按 `capacity = 8 × batch` 切分给各桶——单次系统调用避免递归初始化，连续布局提升缓存局部性。backing OOM 时容量保持零并退化到 SpanList，而非 abort。
@@ -54,8 +54,8 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 ## 4. 并发模型
 
 - **双锁分层**：`SpinLock` 保护 TransferCache（短临界区，快路径）；`std::mutex` 保护 SpanList 与 bitmap 操作（慢路径）。allocator core 一律使用 `detail::NoThrowLockGuard` / `detail::NoThrowUniqueLock`（保证 `noexcept`），不用 `std::lock_guard` / `std::unique_lock`：`std::system_error` 是同步基础设施失效并 fail-fast，不伪装成 OOM。
-- **锁顺序（allocator lock order）**：**桶锁内不进 PageCache**。`GetOneSpan` 在 `span_list_lock` 内发现无可用 Span 时先 `unlock()`，再进入 PageCache，取回后重新加锁插入；`ReleaseListToSpans` 在空 Span 归还 PageCache 前同样先释放桶锁。此顺序避免 CentralCache 桶锁 → PageCache 分片锁的倒置死锁。
-- **预取发布**：SpanList 中预取的指针在**离开 Span bitmap 锁域后**才写入 TransferCache；TransferCache 满时多余对象走 `ReleaseListToSpans` 正常归还路径。
+- **锁顺序（allocator lock order）**：**桶锁内不进 PageCache**。`GetOneSpan` 在 `span_list_lock` 内发现无可用 Span 时先 `unlock()`，再进入 PageCache，取回后重新加锁插入；`ReleaseBatch` 在空 Span 归还 PageCache 前同样先释放桶锁。此顺序避免 CentralCache 桶锁 → PageCache 分片锁的倒置死锁。
+- **预取发布**：SpanList 中预取的指针在**离开 Span bitmap 锁域后**才写入 TransferCache；TransferCache 满时多余对象走 `ReleaseBatch` 正常归还路径。
 - **drain 锁域**：`DrainTransferCaches` 仅在 spin lock 下摘取一段 fixed stack batch，随即
   释放 spin lock；PageMap、bitmap 和 PageCache 操作均在 lock 外执行。它从 pointer array
   的 cold end 摘取并保留余下 hot suffix 的 LIFO 顺序。
@@ -67,7 +67,7 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 | 接口 | 签名 | 语义要点 | Hot path |
 |---|---|---|---|
 | `FetchRange` | `size_t FetchRange(FreeList&, size_t batch_num, size_t aligned_size) noexcept` | `@pre batch_num <= kMaxBatchSize`；先 TransferCache 后 SpanList；返回可能小于请求（OOM 或 Span 不足） | ✅（跨层必经） |
-| `ReleaseListToSpans` | `void ReleaseListToSpans(void*, size_t idx, CentralReleaseMode) noexcept` | `@pre idx < kNumSizeClasses`；默认先吸收 TransferCache；`kSpanBitmap` 直接归还 bitmap | ✅ |
+| `ReleaseBatch` | `void ReleaseBatch(ObjectBatch, CentralReleaseMode) noexcept` | 消费 move-only `ObjectBatch`（封装 head/tail/count/size_class_idx）；以 `count` 为处理边界；默认先吸收 TransferCache，`kSpanBitmap` 直接归还 bitmap；返回前必 `MarkProcessed` | ✅ |
 | `DrainTransferCaches` | `size_t DrainTransferCaches(size_t max_bytes) noexcept` | byte-budgeted cold-end detach；spin lock 外 direct bitmap release | ❌ |
 | `Reset` | `void Reset() noexcept` | 测试/受控 teardown：还原 bitmap、归还 Span、释放并**重建** TransferCache backing（重建失败则优雅降级慢路径、不 abort） | ❌ |
 | `GetOneSpan` | `static Span* (Bucket&, size_t, NoThrowUniqueLock&) noexcept` | 私有；持有桶锁进入，PageCache 期间释放，返回前无论成败均重新持锁 | ❌ |
@@ -81,11 +81,11 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 2. 不足部分进入 SpanList：持 `span_list_lock`，从队首 Span 用 `AllocObject()` 切分对象；Span 满则立即移到队尾（包括最后一次成功分配恰好填满 Span 的边界）并重新读取队首；只有队首无可用位且不存在 partial candidate 时才通过 `GetOneSpan` 补货。
 3. **预取**：除请求数外额外提取一个 batch（`prefetch_target = batch_num`），写入 TransferCache 供下一个请求者；锁外发布。
 
-SpanList 保持 **partial-before-full** 不变量：可分配 Span 位于满 Span 之前。`ReleaseListToSpans`
+SpanList 保持 **partial-before-full** 不变量：可分配 Span 位于满 Span 之前。`ReleaseBatch`
 将刚从 full 变为 partial 的 Span 移到队首；`FetchRange` 则在 Span 变满的同一锁域内
 将其移到队尾。旋转前必须保存 `Span*`，不得在 `erase` 后继续解引用已失效的 iterator。
 
-### 6.2 ReleaseListToSpans
+### 6.2 ReleaseBatch
 
 1. `kTransferCache` 按 `kMaxBatchSize` 分段吸收到 TransferCache（不碰 Span metadata）；
    `kSpanBitmap` 跳过该步。
@@ -107,7 +107,7 @@ bucket 在本次调用中观察到的 snapshot，避免 producer 并发写入时
 
 - `FetchRange` 中 `GetOneSpan` 失败（OOM）→ 返回已取数量（可能 0），不重试。
 - TransferCache backing OOM → 保持 `transfer_cache_capacity == 0` 并从 SpanList 正常服务；仅受控 `Reset` 重试初始化，避免内存压力下 retry storm。
-- TransferCache 满时预取剩余对象走 ReleaseListToSpans，保证所有权一致。
+- TransferCache 满时预取剩余对象走 ReleaseBatch，保证所有权一致。
 - `PageMap::GetSpan` 返回 null（对象不属于 ammalloc）→ 跳过该对象（不崩溃，保持分配器鲁棒）。
 - 测试注入（`AMMALLOC_TEST`）：`g_mock_fetch_range_cap` 设 `0 < cap < batch_num` 时，`FetchRange` 至多返回 `cap` 个对象，用于确定性构造「部分 refill」。
 
@@ -123,7 +123,7 @@ bucket 在本次调用中观察到的 snapshot，避免 producer 并发写入时
 
 `tests/unit/test_central_cache.cpp`：
 
-- 功能：`BasicFetchRange`、`MultipleFetchRange`、`BasicReleaseListToSpans`、`DifferentSizeClasses`、`LargeBatchAllocation`
+- 功能：`BasicFetchRange`、`MultipleFetchRange`、`BasicReleaseBatch`、`DifferentSizeClasses`、`LargeBatchAllocation`
 - 生命周期：`Reset`、`ReallocateAfterRelease`
 - 并发：`MultiThreadedAllocation`、`StressTest`、`FreeListOperations`
 
@@ -147,3 +147,4 @@ bucket 在本次调用中观察到的 snapshot，避免 producer 并发写入时
 | 2026-09-14 | §3 同步 `transfer_cache_count` → `transfer_cache_size/begin`（圆环 TransferCache） | 修复 verify_docs 符号漂移 | — |
 | 2026-09-14 | `FetchRange` 在 full Span 旋转后重新读取队首，exact-fill 亦立即移尾，并禁止解引用已失效 iterator | 防止跳过现有 partial Span 而过度申请新 Span 或产生假性 OOM | S1 |
 | 2026-09-14 | `ReleaseListToSpans` 参数 `aligned_size` → `idx`（调用方均已持有 idx） | 消除 idx↔size 往返；`AM_DCHECK` 替代无法校验的 size 边界 @pre，避免静默错桶 | — |
+| 2026-09-16 | 引入 move-only `ObjectBatch`（head/tail/count/size_class_idx）与 `ReleaseBatch`，删除裸链头入口 `ReleaseListToSpans`；新增 `FreeList::PopBatch/PopBatchTail` 及 `ObjectBatch::FromSingleObject/AdoptChain` 工厂；`ReleaseBatch` 以 `count` 为处理边界 | 消除 release 边界二次 idx 传递与重复/遗漏 release（move-only + 析构断言）；`AdoptChain` 作为跨线程裸链进入所有权令牌的唯一可审计边界。阶段 1 仅 Release 方向，Fetch/Push 仍用 `FreeChain` | — |
