@@ -172,12 +172,12 @@
 *基于 Benchmark 数据和 Review 意见的针对性优化，性价比极高。*
 
 - [x] #### **实现 CentralCache 预取机制 (Prefetching) [Perf]**
-- 背景：当前 FetchRange 的慢速路径（查 SpanList Bitmap）只获取 batch_num 个对象返回给 ThreadCache，此时 TransferCache 依然是空的。下一次请求大概率又要走慢速路径。
+- 背景：当前 FetchBatch 的慢速路径（查 SpanList Bitmap）只获取 batch_num 个对象返回给 ThreadCache，此时 TransferCache 依然是空的。下一次请求大概率又要走慢速路径。
 - 方案：
   1. 在 Slow Path 中，一次性从 Span 申请 batch_num + N 个对象（或填满 tc_capacity）。
   2. 将一部分返回给 ThreadCache，剩下的直接填入 TransferCache 数组。
 - 收益：大幅减少 Span Bitmap 的扫描频率和 span_lock (Mutex) 的争抢。Benchmark 显示多线程小对象分配吞吐量提升 3-5 倍。
-- 状态：已完成，逻辑包含在 `FetchRange` 中。
+- 状态：已完成，逻辑包含在 `FetchBatch` 中。
 
 - [x] #### **优化 SizeClass 边界测试 [Test]**
 - 背景：确保索引计算逻辑在跨组边界（如 128B, 129B, 256B）时的绝对正确性。
@@ -186,7 +186,7 @@
 
 - [ ] #### **优化 CentralCache 锁粒度与 Bitmap 扫描 [Perf]** 
 
-- 背景：`FetchRange` 持有 `span_list_lock` 调用 `AllocObject`。对于大 Span (128页)，`AllocObject` 内部的 Bitmap 扫描可能耗时较长，阻塞其他线程。
+- 背景：`FetchBatch` 持有 `span_list_lock` 调用 `AllocObject`。对于大 Span (128页)，`AllocObject` 内部的 Bitmap 扫描可能耗时较长，阻塞其他线程。
 - 方案：在 `Span` 中维护 `scan_cursor` 提示，记录上次扫描位置，避免每次从头扫描 Bitmap。
 
 - [ ] #### **补齐 OOM 错误处理与 `errno=ENOMEM` 语义 [Correctness]**

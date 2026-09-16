@@ -209,7 +209,7 @@ SpanBitmapFree
 
 ## 7.5 显式 ObjectBatch 接口
 
-> **实施状态（2026-09-16，阶段 1 已落地）**：Release 方向已引入 move-only `ObjectBatch`，字段为 `head/tail/count/size_class_idx`（`size_t`，暂未加入 `shard_id`，因当前无完整 Central shard 协议）。`CentralCache::ReleaseBatch(ObjectBatch, mode)` 取代并删除了裸链头入口 `ReleaseListToSpans`；`FreeList::PopBatch/PopBatchTail` 产生批次，`ObjectBatch::FromSingleObject`（单对象）与 `ObjectBatch::AdoptChain(FreeChain, idx)`（跨线程无锁队列等外部裸链的唯一可审计 adoption 边界）为受控工厂。跨线程 handoff 用可复制 POD `TransferRecord{FreeChain, size_class_idx}` 传输，消费端一次性 adopt 进入 move-only 协议。`FetchBatch -> ObjectBatch` 对称接口（Fetch/Push 方向）仍留待阶段 2 评估，当前 Fetch/Push 继续使用 `FreeChain`。
+> **实施状态（2026-09-17，阶段 1+2 已落地）**：Release 方向（阶段 1）引入 move-only `ObjectBatch`（字段 `head/tail/count/size_class_idx`，`size_t`，暂未加 `shard_id`——当前无完整 Central shard 协议）：`CentralCache::ReleaseBatch(ObjectBatch, mode)` 取代并删除裸链头入口 `ReleaseListToSpans`；`FreeList::PopBatch/PopBatchTail` 产生批次，`ObjectBatch::FromSingleObject`/`AdoptChain(FreeChain, idx)` 为受控工厂；跨线程 handoff 用可复制 POD `TransferRecord{FreeChain, size_class_idx}` 传输，消费端一次性 adopt。Fetch 方向（阶段 2）对称化：`CentralCache::FetchBatch(idx, preferred_count)` 返回 move-only `ObjectBatch`（取代并删除 `FetchRange(FreeList&, batch_num, aligned_size)`），`FreeList::PushBatch(ObjectBatch)` 消费、`ThreadCache::AcceptFetchedBatch` 路由到 `free_lists_[idx]`；`ObjectBatch::DetachChainForTransport() &&` 作为 token→transport 的反向可审计边界，供跨线程 producer O(1) 转 `TransferRecord`（不经临时 FreeList）。至此 Fetch/Release 均以 move-only `ObjectBatch` 表达所有权。仍未做：`shard_id` 字段、TransferCache descriptor/BatchSlot、动态容量、NUMA route——TransferCache 底层保持 pointer array。
 
 ### 7.5.1 设计目的
 
@@ -487,7 +487,7 @@ CPU/thread -> local Frontend -> local Central shard -> local PageCache region
 
 NUMA 模式必须提供单 node 和不可识别拓扑时的透明回退。
 
-## 7.12 FetchRange 事务化流程
+## 7.12 FetchBatch 事务化流程
 
 ### 7.12.1 阶段 1：路由与校验
 
