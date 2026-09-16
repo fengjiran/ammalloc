@@ -63,13 +63,13 @@ setup work so the reported rate reflects only the timed region.
 | `tc_drain_Bps` | bytes/s | Bytes removed from TransferCache by `DrainTransferCaches` |
 | `span_unpin_direct_rate` | spans/s | Spans emptied via `kSpanBitmap` release mode |
 | `span_return_pc_rate` | spans/s | Spans handed back to `PageCache::ReleaseSpan` (both modes) |
-| `fetch_hit_rate` | objects/s | Objects popped directly from TransferCache by `FetchRange` |
-| `fetch_span_rate` | objects/s | Objects carved from Span bitmaps by `FetchRange`, including prefetch |
+| `fetch_hit_rate` | objects/s | Objects popped directly from TransferCache by `FetchBatch` |
+| `fetch_span_rate` | objects/s | Objects carved from Span bitmaps by `FetchBatch`, including prefetch |
 | `fetch_pc_rate` | spans/s | Spans borrowed from PageCache by `GetOneSpan` |
 | `rel_overflow_rate` | objects/s | `kTransferCache` releases that fell through to bitmap because TransferCache was full |
 | `pa_success_rate` | calls/s | Successful `PageAllocator::SystemAlloc` calls (mmap-level) |
-| `span_rotations_rate` | rotations/s | Full-Span `erase`+`push_back` rotations in the `FetchRange` SpanList loop |
-| `span_traversals_rate` | visits/s | Span visits inside the `FetchRange` SpanList traversal loop |
+| `span_rotations_rate` | rotations/s | Full-Span `erase`+`push_back` rotations in the `FetchBatch` SpanList loop |
+| `span_traversals_rate` | visits/s | Span visits inside the `FetchBatch` SpanList traversal loop |
 | `scav_passes_rate` | passes/s | Completed `PageHeapScavenger::ScavengeOnePass` invocations |
 | `scav_spans_rate` | spans/s | Idle spans detached for reclamation |
 | `scav_bytes_Bps` | bytes/s | Bytes actually returned to the OS via `MADV_DONTNEED` |
