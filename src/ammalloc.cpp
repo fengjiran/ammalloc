@@ -153,8 +153,8 @@ AM_NOINLINE void am_free_slow_path(void* ptr, Span* span, size_t aligned_size,
     if (!ptls) AM_UNLIKELY {
         ptls = CreateThreadCache();
         if (!ptls) {
-            static_cast<FreeBlock*>(ptr)->next = nullptr;
-            CentralCache::GetInstance().ReleaseListToSpans(ptr, idx);
+            CentralCache::GetInstance().ReleaseBatch(
+                    ObjectBatch::FromSingleObject(ptr, idx));
             return;
         }
     }

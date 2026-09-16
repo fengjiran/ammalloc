@@ -8,10 +8,13 @@
 #include "ammalloc/assert.h"
 #include "ammalloc/attributes.h"
 #include "ammalloc/config.h"
+#include "ammalloc/size_class.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <type_traits>
+#include <utility>
 
 namespace ammalloc {
 
@@ -31,10 +34,163 @@ static_assert(sizeof(FreeBlock) <= SystemConfig::ALIGNMENT,
 /// `head` and `tail` point to `FreeBlock` nodes. In a well-formed chain,
 /// `tail->next == nullptr` and the chain contains exactly `count` nodes.
 struct FreeChain {
-    void* head = nullptr;   ///< First node in the chain (FreeBlock*).
-    void* tail = nullptr;   ///< Last node in the chain (FreeBlock*); tail->next == nullptr.
-    size_t count = 0;       ///< Number of nodes in the chain.
+    void* head = nullptr;///< First node in the chain (FreeBlock*).
+    void* tail = nullptr;///< Last node in the chain (FreeBlock*); tail->next == nullptr.
+    size_t count = 0;    ///< Number of nodes in the chain.
 };
+
+/// @brief Move-only ownership token for one detached batch of free objects.
+///
+/// An ObjectBatch carries a single intrusive chain (head/tail/count) plus the
+/// size class that owns every object. Exactly one live instance is responsible
+/// for delivering the batch to the next layer (a CentralCache release). Moving
+/// transfers that responsibility and empties the source; copying is forbidden so
+/// two descriptors can never claim the same chain, and move assignment is
+/// deleted so a batch can never be overwritten while still holding objects.
+///
+/// @note Ownership here means "who must keep delivering these objects", not
+///       "free on destruct". The objects and their Span storage stay owned by
+///       the allocator. The destructor therefore releases nothing; it only
+///       asserts in debug builds that the batch was consumed, because an
+///       unconsumed non-empty batch would silently leak its objects.
+class ObjectBatch {
+public:
+    ObjectBatch() noexcept = default;
+
+    ObjectBatch(const ObjectBatch&) = delete;
+    ObjectBatch& operator=(const ObjectBatch&) = delete;
+    ObjectBatch& operator=(ObjectBatch&&) = delete;
+
+    ObjectBatch(ObjectBatch&& other) noexcept
+        : head_(std::exchange(other.head_, nullptr)),
+          tail_(std::exchange(other.tail_, nullptr)),
+          count_(std::exchange(other.count_, 0)),
+          size_class_idx_(std::exchange(other.size_class_idx_, kInvalidClass)) {}
+
+    ~ObjectBatch() {
+        // Never touch CentralCache here: hidden locks, singleton/TLS teardown
+        // order, shutdown recursion and unpredictable latency all argue against
+        // auto-release. Consumption is explicit; this only catches a forgotten
+        // release in debug builds.
+        AM_DCHECK(empty());
+    }
+
+    /// @brief Builds a single-object batch, terminating its intrusive link.
+    /// @param object Non-null object whose first pointer-sized bytes may hold a
+    ///        link; becomes both head and tail.
+    /// @param idx Size class that owns `object`.
+    /// @pre `object != nullptr` and `idx < SizeClass::kNumSizeClasses`.
+    /// @note Validates only the descriptor shape and idx range; it does NOT
+    ///       query PageMap to prove the object's real class, which would
+    ///       duplicate slow-path work. Object-class correctness is a precondition.
+    AM_NODISCARD static ObjectBatch FromSingleObject(void* object, size_t idx) noexcept {
+        AM_DCHECK(object != nullptr);
+        AM_DCHECK(idx < SizeClass::kNumSizeClasses);
+        if (!object) {
+            // Release-mode defense only; Debug aborts on the precondition above.
+            // am_free rejects null before this factory is ever reached.
+            return {};
+        }
+        static_cast<FreeBlock*>(object)->next = nullptr;
+        return {object, object, 1, idx};
+    }
+
+    /// @brief Adopts exclusive delivery responsibility for a detached chain.
+    /// @param chain Transport representation (head/tail/count) of a well-formed
+    ///        detached chain, e.g. from `FreeList::PopRange` or a lock-free queue.
+    /// @param idx Size class owning every object in `chain`.
+    /// @pre `idx < SizeClass::kNumSizeClasses`. For a non-empty chain: head/tail
+    ///      are non-null, `count > 0`, tail is reachable in `count - 1` links,
+    ///      `tail->next == nullptr`, and every object belongs to `idx`.
+    /// @note This is the single audited edge where an externally-owned raw chain
+    ///       (lock-free queue, remote-free queue, backend completion) becomes a
+    ///       move-only token. It does NOT query PageMap; class ownership stays a
+    ///       caller precondition, checked on the normal release path as applicable.
+    AM_NODISCARD static ObjectBatch AdoptChain(FreeChain chain, size_t idx) noexcept {
+        AM_DCHECK(idx < SizeClass::kNumSizeClasses);
+        if (chain.count == 0) {
+            AM_DCHECK(chain.head == nullptr);
+            AM_DCHECK(chain.tail == nullptr);
+            return {};
+        }
+        return {chain.head, chain.tail, chain.count, idx};
+    }
+
+    /// @brief Reports whether the batch holds no objects.
+    AM_NODISCARD bool empty() const noexcept {
+        return count_ == 0;
+    }
+    /// @brief Hottest node, the next one a consumer should take.
+    AM_NODISCARD void* head() const noexcept {
+        return head_;
+    }
+    /// @brief Coldest node; `tail()->next == nullptr` in a well-formed batch.
+    AM_NODISCARD void* tail() const noexcept {
+        return tail_;
+    }
+    /// @brief Number of objects in the chain.
+    AM_NODISCARD size_t count() const noexcept {
+        return count_;
+    }
+    /// @brief Size class owning every object; `kInvalidClass` when empty.
+    AM_NODISCARD size_t size_class_idx() const noexcept {
+        return size_class_idx_;
+    }
+
+private:
+    friend class FreeList;
+    friend class CentralCache;
+
+    ObjectBatch(void* head, void* tail, size_t count, size_t idx) noexcept
+        : head_(head), tail_(tail), count_(count), size_class_idx_(idx) {
+        AM_DCHECK(IsCanonical());
+    }
+
+    /// @brief Records that CentralCache finished handling the whole input.
+    /// @note Means "this batch has been processed", NOT "every object reached a
+    ///       cache or bitmap". Precondition violations (for example a PageMap
+    ///       miss) are defensively skipped yet still land here.
+    void MarkProcessed() noexcept {
+        head_ = nullptr;
+        tail_ = nullptr;
+        count_ = 0;
+        size_class_idx_ = kInvalidClass;
+    }
+
+    /// @brief Debug-only shape check; the chain walk is O(count).
+    AM_NODISCARD bool IsCanonical() const noexcept {
+        if (count_ == 0) {
+            return head_ == nullptr && tail_ == nullptr && size_class_idx_ == kInvalidClass;
+        }
+
+        if (head_ == nullptr || tail_ == nullptr || size_class_idx_ >= SizeClass::kNumSizeClasses) {
+            return false;
+        }
+
+        auto* cur = static_cast<FreeBlock*>(head_);
+        for (size_t i = 1; i < count_; ++i) {
+            if (cur == nullptr) {
+                return false;
+            }
+            cur = cur->next;
+        }
+        return cur == static_cast<FreeBlock*>(tail_) && cur->next == nullptr;
+    }
+
+    /// Sentinel for "no class"; a valid idx is always `< kNumSizeClasses`.
+    static constexpr size_t kInvalidClass = SizeClass::kNumSizeClasses;
+
+    void* head_{nullptr};
+    void* tail_{nullptr};
+    size_t count_{0};
+    size_t size_class_idx_{kInvalidClass};
+};
+
+static_assert(!std::is_copy_constructible_v<ObjectBatch>);
+static_assert(!std::is_copy_assignable_v<ObjectBatch>);
+static_assert(!std::is_move_assignable_v<ObjectBatch>);
+static_assert(std::is_nothrow_move_constructible_v<ObjectBatch>);
+static_assert(sizeof(ObjectBatch) <= 4 * sizeof(void*));
 
 /// @brief Stores free objects in an allocation-free intrusive LIFO chain.
 ///
@@ -169,6 +325,32 @@ public:
         // Invariant: head_ is null exactly when size_ is zero.
         AM_DCHECK((head_ == nullptr) == (size_ == 0));
         return out;
+    }
+
+    /// @brief Detaches up to `count` front objects as a move-only owned batch.
+    /// @param count Maximum number of objects to remove.
+    /// @param idx Size class owning every object in this list.
+    /// @return Batch tagging the PopRange chain with `idx`; empty when the list
+    ///         holds nothing (an empty batch must carry `kInvalidClass`).
+    AM_NODISCARD ObjectBatch PopBatch(size_t count, size_t idx) noexcept {
+        const FreeChain chain = PopRange(count);
+        if (chain.count == 0) {
+            return {};
+        }
+        return {chain.head, chain.tail, chain.count, idx};
+    }
+
+    /// @brief Detaches up to `count` back objects as a move-only owned batch.
+    /// @param count Maximum number of objects to remove.
+    /// @param idx Size class owning every object in this list.
+    /// @return Batch tagging the PopRangeTail chain with `idx`; empty when
+    ///         nothing is evictable.
+    AM_NODISCARD ObjectBatch PopBatchTail(size_t count, size_t idx) noexcept {
+        const FreeChain chain = PopRangeTail(count);
+        if (chain.count == 0) {
+            return {};
+        }
+        return {chain.head, chain.tail, chain.count, idx};
     }
 
     /// @brief Removes the most recently pushed object.

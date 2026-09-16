@@ -101,7 +101,7 @@ TEST(AmMallocOomTest, FreeFallsBackToCentralCacheWhenThreadCacheInitFails) {
     g_mock_normal_alloc_fail.store(true, std::memory_order_relaxed);
     std::thread worker([p] {
         // CreateThreadCache fails inside am_free_slow_path, which must degrade
-        // to CentralCache::ReleaseListToSpans rather than crash.
+        // to CentralCache::ReleaseBatch rather than crash.
         am_free(p);
 
         // Prove the worker never built a ThreadCache: a subsequent allocation

@@ -149,6 +149,9 @@ size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
             // SpanList. Return any excess through the normal ownership path.
             if (successfully_pushed < actual_prefetched) {
                 void* leftover_head = nullptr;
+                // First linked node becomes the tail; the loop head-inserts the
+                // rest, so the last processed node is the head.
+                void* const leftover_tail = scratch_ptrs[successfully_pushed];
 
                 for (size_t i = successfully_pushed; i < actual_prefetched; ++i) {
                     auto* node = static_cast<FreeBlock*>(scratch_ptrs[i]);
@@ -156,7 +159,8 @@ size_t CentralCache::FetchRange(FreeList& free_list, size_t fetch_num,
                     leftover_head = scratch_ptrs[i];
                 }
 
-                ReleaseListToSpans(leftover_head, idx);
+                ReleaseBatch(ObjectBatch(leftover_head, leftover_tail,
+                                         actual_prefetched - successfully_pushed, idx));
             }
         }
     }
@@ -182,21 +186,30 @@ size_t CentralCache::GetTransferCacheCountForTest(size_t idx) noexcept {
     return count;
 }
 
-void CentralCache::ReleaseListToSpans(void* start, size_t idx,
-                                      CentralReleaseMode mode) noexcept {
+void CentralCache::ReleaseBatch(ObjectBatch batch, CentralReleaseMode mode) noexcept {
+    if (batch.empty()) {
+        batch.MarkProcessed();
+        return;
+    }
+
+    const size_t idx = batch.size_class_idx();
     AM_DCHECK(idx < SizeClass::kNumSizeClasses);
     auto& bucket = buckets_[idx];
-    void* cur = start;
+    void* cur = batch.head();
+    // `count` is the authoritative batch boundary; the canonical chain is
+    // terminated, so consuming exactly count objects lands on the null tail.
+    size_t remaining = batch.count();
 
-    while (cur) {
+    while (remaining != 0) {
         // Only [0, local_count) is read after being written; keep the buffer
         // uninitialized to avoid clearing 4 KiB on every batch.
         std::array<void*, SizeClass::kMaxBatchSize> local_ptrs;// NOLINT
-        size_t local_count = 0;
-        while (cur && local_count < SizeClass::kMaxBatchSize) {
-            local_ptrs[local_count++] = cur;
+        const size_t local_count = std::min(remaining, SizeClass::kMaxBatchSize);
+        for (size_t i = 0; i < local_count; ++i) {
+            local_ptrs[i] = cur;
             cur = static_cast<FreeBlock*>(cur)->next;
         }
+        remaining -= local_count;
 
         size_t pushed = 0;
         if (mode == CentralReleaseMode::kTransferCache) {
@@ -220,6 +233,7 @@ void CentralCache::ReleaseListToSpans(void* start, size_t idx,
                 stats_.release_transfer_overflow_objects.fetch_add(
                         local_count - pushed, std::memory_order_relaxed);
             }
+
             // Spans that reach use_count == 0 are collected into an intrusive
             // list and released to PageCache only after dropping the bucket
             // lock: one unlock per batch instead of one per empty Span, and no
@@ -231,6 +245,8 @@ void CentralCache::ReleaseListToSpans(void* start, size_t idx,
                 void* obj = local_ptrs[i];
                 auto* span = PageMap::GetSpan(obj);
                 if (!span) {
+                    // Precondition violation (object not owned by ammalloc):
+                    // defensively skip; it is not an internal delivery failure.
                     continue;
                 }
 
@@ -266,6 +282,9 @@ void CentralCache::ReleaseListToSpans(void* start, size_t idx,
             }
         }
     }
+
+    AM_DCHECK(cur == nullptr);
+    batch.MarkProcessed();
 }
 
 size_t CentralCache::DrainTransferCaches(size_t max_bytes) noexcept {
@@ -332,9 +351,10 @@ size_t CentralCache::DrainTransferCaches(size_t max_bytes) noexcept {
             }
 
             // The transfer lock is intentionally not held across PageMap,
-            // bitmap, or PageCache work. ReleaseListToSpans drops the bucket
+            // bitmap, or PageCache work. ReleaseBatch drops the bucket
             // mutex before it can enter PageCache as well.
-            ReleaseListToSpans(head, idx, CentralReleaseMode::kSpanBitmap);
+            ReleaseBatch(ObjectBatch(head, local_ptrs[0], detached, idx),
+                         CentralReleaseMode::kSpanBitmap);
 
             const size_t batch_bytes = detached * aligned_size;
             drained_bytes += batch_bytes;

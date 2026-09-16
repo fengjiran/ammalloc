@@ -65,7 +65,7 @@ struct CentralCacheStats {
     /// kTransferCache release and therefore fell through to Span bitmaps.
     std::atomic<size_t> release_transfer_overflow_objects{0};
     /// Cumulative Spans handed back to PageCache::ReleaseSpan by
-    /// ReleaseListToSpans, regardless of release mode.
+    /// ReleaseBatch, regardless of release mode.
     std::atomic<size_t> release_spans_returned_to_pagecache{0};
     /// Cumulative full-Span rotations (`erase` + `push_back`) performed by
     /// FetchRange to keep partially free Spans near the SpanList head.
@@ -150,17 +150,20 @@ public:
     size_t FetchRange(FreeList& free_list, size_t fetch_num,
                       size_t aligned_size) noexcept;
 
-    /// @brief Returns an intrusive object chain to the matching shared bucket.
-    /// @param start Head of a non-empty chain of objects from one size class.
-    /// @param idx Size-class index of the bucket that owns every object.
+    /// @brief Consumes a move-only object batch into the matching shared bucket.
+    /// @param batch Ownership token for one detached chain; taken by value so the
+    ///        caller moves it in and this call becomes the sole owner. It is
+    ///        always marked processed before returning, so an empty or fully
+    ///        delivered batch never trips the destructor's consumed assertion.
     /// @param mode Selects whether objects enter TransferCache or are released
     ///        directly to Span bitmaps.
-    /// @pre `idx < SizeClass::kNumSizeClasses` and every object belongs to an
-    ///      ammalloc Span of that size class.
-    /// @note Chains longer than `kMaxBatchSize` are drained in batches; the
-    ///       caller may pass the whole free list (for example at thread exit).
-    void ReleaseListToSpans(void* start, size_t idx,
-                            CentralReleaseMode mode = CentralReleaseMode::kTransferCache) noexcept;
+    /// @pre Every object belongs to an ammalloc Span of `batch.size_class_idx()`;
+    ///      an object whose PageMap lookup misses is defensively skipped.
+    /// @note Chains longer than `kMaxBatchSize` are drained in batches. Delivery
+    ///       failures after a commit point (full TransferCache, prefetch race)
+    ///       fall through to the Span bitmap so no object is lost.
+    void ReleaseBatch(ObjectBatch batch,
+                      CentralReleaseMode mode = CentralReleaseMode::kTransferCache) noexcept;
 
     /// @brief Returns bounded TransferCache contents directly to Span bitmaps.
     /// @param max_bytes Maximum logical object bytes to drain; SIZE_MAX removes

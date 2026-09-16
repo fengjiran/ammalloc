@@ -111,14 +111,20 @@ void BenchmarkThreadCacheReturn(benchmark::State& state) {
         const bool ready = tc.GetMaxSizeForTest(idx) == kQuotaCap &&
                            held.size() >= kQuotaCap && tc.CachedBytesSnapshot() == 0;
         void* surplus = nullptr;
+        void* surplus_tail = nullptr;
         const size_t cached_count = ready ? kQuotaCap : 0;
         for (size_t i = cached_count; i < held.size(); ++i) {
             auto* object = static_cast<FreeBlock*>(held[i]);
             object->next = static_cast<FreeBlock*>(surplus);
+            if (surplus == nullptr) {
+                surplus_tail = object;// First linked node is the chain tail.
+            }
             surplus = object;
         }
-        CentralCache::GetInstance().ReleaseListToSpans(
-                surplus, idx, CentralReleaseMode::kSpanBitmap);
+        CentralCache::GetInstance().ReleaseBatch(
+                ObjectBatch::AdoptChain(
+                        FreeChain{surplus, surplus_tail, held.size() - cached_count}, idx),
+                CentralReleaseMode::kSpanBitmap);
         for (size_t i = 0; i < cached_count; ++i) {
             tc.Deallocate(held[i], idx);
         }

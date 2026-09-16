@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <limits>
 #include <thread>
+#include <type_traits>
 
 namespace {
 
@@ -243,27 +244,24 @@ void TearDownCentralBenchmarkState(const benchmark::State&) {
     PageCache::GetInstance().Reset();
 }
 
-void* DetachFreeList(FreeList& list) {
-    void* head = nullptr;
-    while (!list.empty()) {
-        auto* object = static_cast<FreeBlock*>(list.Pop());
-        object->next = static_cast<FreeBlock*>(head);
-        head = object;
-    }
-    return head;
+// Detaches the whole list as a copyable transport chain (order preserved).
+// Adoption into a move-only ObjectBatch happens at the release site via
+// ObjectBatch::AdoptChain, keeping the O(count) walk in the paused prep phase.
+FreeChain DetachFreeList(FreeList& list) {
+    return list.PopRange(list.size());
 }
 
 void ReleaseFreeList(FreeList& list, size_t size, CentralReleaseMode mode) {
-    GetCentralCache().ReleaseListToSpans(DetachFreeList(list), SizeClass::Index(size), mode);
+    GetCentralCache().ReleaseBatch(list.PopBatch(list.size(), SizeClass::Index(size)), mode);
 }
 
 void ReleaseOneToBitmap(void* object, size_t size) {
     if (!object) {
         return;
     }
-    static_cast<FreeBlock*>(object)->next = nullptr;
-    GetCentralCache().ReleaseListToSpans(object, SizeClass::Index(size),
-                                         CentralReleaseMode::kSpanBitmap);
+    GetCentralCache().ReleaseBatch(
+            ObjectBatch::FromSingleObject(object, SizeClass::Index(size)),
+            CentralReleaseMode::kSpanBitmap);
 }
 
 void DrainAllTransferCaches() {
@@ -355,7 +353,7 @@ bool PreparePartialFetch(size_t size, size_t request, size_t partial, void** anc
     return false;
 }
 
-bool PrepareReleaseWithTransferOccupancy(void** chain, size_t size,
+bool PrepareReleaseWithTransferOccupancy(FreeChain* chain, size_t size,
                                          size_t initial_transfer_count) {
     FreeList held;
     if (!PrepareHeldObjects(held, kReleaseChainSize, size) ||
@@ -367,7 +365,7 @@ bool PrepareReleaseWithTransferOccupancy(void** chain, size_t size,
     return true;
 }
 
-bool PrepareDetachedHeldObjects(void** chain, size_t count, size_t size) {
+bool PrepareDetachedHeldObjects(FreeChain* chain, size_t count, size_t size) {
     FreeList held;
     if (!PrepareHeldObjects(held, count, size)) {
         ReleaseFreeList(held, size, CentralReleaseMode::kSpanBitmap);
@@ -377,10 +375,11 @@ bool PrepareDetachedHeldObjects(void** chain, size_t count, size_t size) {
     return true;
 }
 
-void ReleaseChainToBitmap(void** chain, size_t size) {
-    GetCentralCache().ReleaseListToSpans(*chain, SizeClass::Index(size),
-                                         CentralReleaseMode::kSpanBitmap);
-    *chain = nullptr;
+void ReleaseChainToBitmap(FreeChain* chain, size_t size) {
+    GetCentralCache().ReleaseBatch(
+            ObjectBatch::AdoptChain(*chain, SizeClass::Index(size)),
+            CentralReleaseMode::kSpanBitmap);
+    *chain = {};
 }
 
 bool PrepareFragmentedSpans(FreeList& first, FreeList& second, size_t size) {
@@ -414,9 +413,9 @@ bool PrepareFragmentedSpans(FreeList& first, FreeList& second, size_t size) {
 // returned chain fully pins `target_spans` distinct Spans. Probes one object
 // first to learn the per-Span capacity, then returns the probe and re-fetches
 // the whole chain through PrepareHeldObjects for a deterministic layout.
-bool PrepareMultiSpanChain(void** chain, size_t size, size_t target_spans,
+bool PrepareMultiSpanChain(FreeChain* chain, size_t size, size_t target_spans,
                            size_t* total_count) {
-    *chain = nullptr;
+    *chain = {};
     *total_count = 0;
     FreeList probe_list;
     if (!FetchExact(probe_list, 1, size)) {
@@ -655,7 +654,7 @@ void BM_CentralCache_Fetch_FragmentedSpans(benchmark::State& state) {
 
 void BM_CentralCache_Release_TransferEmpty(benchmark::State& state) {
     const size_t size = static_cast<size_t>(state.range(0));
-    void* chain = nullptr;
+    FreeChain chain{};
     PrepGuard prep;
     if (!PrepareDetachedHeldObjects(&chain, kReleaseChainSize, size)) {
         state.SkipWithError("failed to prepare a release chain with an empty TransferCache");
@@ -665,8 +664,8 @@ void BM_CentralCache_Release_TransferEmpty(benchmark::State& state) {
     const auto before = SnapshotStats();
     int64_t released_objects = 0;
     for (auto _: state) {
-        GetCentralCache().ReleaseListToSpans(chain, SizeClass::Index(size));
-        chain = nullptr;
+        GetCentralCache().ReleaseBatch(ObjectBatch::AdoptChain(chain, SizeClass::Index(size)));
+        chain = {};
         released_objects += static_cast<int64_t>(kReleaseChainSize);
 
         state.PauseTiming();
@@ -691,7 +690,7 @@ void BM_CentralCache_Release_TransferPartial(benchmark::State& state) {
     const size_t size = static_cast<size_t>(state.range(0));
     const size_t capacity = TransferCapacity(size);
     const size_t initial_count = capacity - kReleaseChainSize / 2;
-    void* chain = nullptr;
+    FreeChain chain{};
     PrepGuard prep;
     if (!PrepareReleaseWithTransferOccupancy(&chain, size, initial_count)) {
         state.SkipWithError("failed to prepare a partially full TransferCache");
@@ -701,8 +700,8 @@ void BM_CentralCache_Release_TransferPartial(benchmark::State& state) {
     const auto before = SnapshotStats();
     int64_t released_objects = 0;
     for (auto _: state) {
-        GetCentralCache().ReleaseListToSpans(chain, SizeClass::Index(size));
-        chain = nullptr;
+        GetCentralCache().ReleaseBatch(ObjectBatch::AdoptChain(chain, SizeClass::Index(size)));
+        chain = {};
         released_objects += static_cast<int64_t>(kReleaseChainSize);
 
         state.PauseTiming();
@@ -733,7 +732,7 @@ void BM_CentralCache_Release_TransferPartial(benchmark::State& state) {
 void BM_CentralCache_Release_TransferFullToBitmap(benchmark::State& state) {
     const size_t size = static_cast<size_t>(state.range(0));
     const size_t capacity = TransferCapacity(size);
-    void* chain = nullptr;
+    FreeChain chain{};
     PrepGuard prep;
     if (!PrepareReleaseWithTransferOccupancy(&chain, size, capacity)) {
         state.SkipWithError("failed to prepare a full TransferCache");
@@ -743,8 +742,8 @@ void BM_CentralCache_Release_TransferFullToBitmap(benchmark::State& state) {
     const auto before = SnapshotStats();
     int64_t released_objects = 0;
     for (auto _: state) {
-        GetCentralCache().ReleaseListToSpans(chain, SizeClass::Index(size));
-        chain = nullptr;
+        GetCentralCache().ReleaseBatch(ObjectBatch::AdoptChain(chain, SizeClass::Index(size)));
+        chain = {};
         released_objects += static_cast<int64_t>(kReleaseChainSize);
 
         state.PauseTiming();
@@ -775,7 +774,7 @@ void BM_CentralCache_Release_TransferFullToBitmap(benchmark::State& state) {
 void BM_CentralCache_Release_DirectBitmapRetainedSpan(benchmark::State& state) {
     const size_t size = static_cast<size_t>(state.range(0));
     void* anchor = nullptr;
-    void* chain = nullptr;
+    FreeChain chain{};
     PrepGuard prep;
     if (!PrepareSpanAnchor(size, &anchor) ||
         !PrepareDetachedHeldObjects(&chain, kReleaseChainSize, size)) {
@@ -790,9 +789,10 @@ void BM_CentralCache_Release_DirectBitmapRetainedSpan(benchmark::State& state) {
     const auto before = SnapshotStats();
     int64_t released_objects = 0;
     for (auto _: state) {
-        GetCentralCache().ReleaseListToSpans(chain, SizeClass::Index(size),
-                                             CentralReleaseMode::kSpanBitmap);
-        chain = nullptr;
+        GetCentralCache().ReleaseBatch(
+                ObjectBatch::AdoptChain(chain, SizeClass::Index(size)),
+                CentralReleaseMode::kSpanBitmap);
+        chain = {};
         released_objects += static_cast<int64_t>(kReleaseChainSize);
 
         state.PauseTiming();
@@ -815,7 +815,7 @@ void BM_CentralCache_Release_DirectBitmapRetainedSpan(benchmark::State& state) {
 
 void BM_CentralCache_Release_DirectBitmapUnpinSpan(benchmark::State& state) {
     const size_t size = static_cast<size_t>(state.range(0));
-    void* chain = nullptr;
+    FreeChain chain{};
     PrepGuard prep;
     if (!PrepareDetachedHeldObjects(&chain, 1, size)) {
         state.SkipWithError("failed to prepare a single-span pin");
@@ -825,9 +825,10 @@ void BM_CentralCache_Release_DirectBitmapUnpinSpan(benchmark::State& state) {
     const auto before = SnapshotStats();
     int64_t released_objects = 0;
     for (auto _: state) {
-        GetCentralCache().ReleaseListToSpans(chain, SizeClass::Index(size),
-                                             CentralReleaseMode::kSpanBitmap);
-        chain = nullptr;
+        GetCentralCache().ReleaseBatch(
+                ObjectBatch::AdoptChain(chain, SizeClass::Index(size)),
+                CentralReleaseMode::kSpanBitmap);
+        chain = {};
         ++released_objects;
 
         state.PauseTiming();
@@ -850,7 +851,7 @@ void BM_CentralCache_Release_DirectBitmapUnpinSpan(benchmark::State& state) {
 void BM_CentralCache_Release_DirectBitmapUnpinMultiSpan(benchmark::State& state) {
     const size_t size = static_cast<size_t>(state.range(0));
     constexpr size_t kTargetSpans = 3;
-    void* chain = nullptr;
+    FreeChain chain{};
     size_t chain_count = 0;
     PrepGuard prep;
     if (!PrepareMultiSpanChain(&chain, size, kTargetSpans, &chain_count)) {
@@ -861,9 +862,10 @@ void BM_CentralCache_Release_DirectBitmapUnpinMultiSpan(benchmark::State& state)
     const auto before = SnapshotStats();
     int64_t released_objects = 0;
     for (auto _: state) {
-        GetCentralCache().ReleaseListToSpans(chain, SizeClass::Index(size),
-                                             CentralReleaseMode::kSpanBitmap);
-        chain = nullptr;
+        GetCentralCache().ReleaseBatch(
+                ObjectBatch::AdoptChain(chain, SizeClass::Index(size)),
+                CentralReleaseMode::kSpanBitmap);
+        chain = {};
         released_objects += static_cast<int64_t>(chain_count);
 
         state.PauseTiming();
@@ -887,7 +889,7 @@ void BM_CentralCache_Release_DirectBitmapUnpinMultiSpan(benchmark::State& state)
 void BM_CentralCache_Release_LongChain(benchmark::State& state) {
     const size_t size = static_cast<size_t>(state.range(0));
     const size_t chain_count = static_cast<size_t>(state.range(1));
-    void* chain = nullptr;
+    FreeChain chain{};
     PrepGuard prep;
     if (!PrepareDetachedHeldObjects(&chain, chain_count, size)) {
         state.SkipWithError("failed to prepare a multi-batch release chain");
@@ -897,8 +899,8 @@ void BM_CentralCache_Release_LongChain(benchmark::State& state) {
     const auto before = SnapshotStats();
     int64_t released_objects = 0;
     for (auto _: state) {
-        GetCentralCache().ReleaseListToSpans(chain, SizeClass::Index(size));
-        chain = nullptr;
+        GetCentralCache().ReleaseBatch(ObjectBatch::AdoptChain(chain, SizeClass::Index(size)));
+        chain = {};
         released_objects += static_cast<int64_t>(chain_count);
 
         state.PauseTiming();
@@ -1207,8 +1209,9 @@ void BM_CentralCache_Contention(benchmark::State& state) {
         const CentralReleaseMode release_mode =
                 DirectBitmapRelease ? CentralReleaseMode::kSpanBitmap
                                     : CentralReleaseMode::kTransferCache;
-        GetCentralCache().ReleaseListToSpans(DetachFreeList(caller), SizeClass::Index(size),
-                                             release_mode);
+        GetCentralCache().ReleaseBatch(
+                ObjectBatch::AdoptChain(DetachFreeList(caller), SizeClass::Index(size)),
+                release_mode);
         processed_objects += static_cast<int64_t>(kRequestPerIter);
     }
     SetProcessed(state, processed_objects, size);
@@ -1218,10 +1221,17 @@ void BM_CentralCache_Contention(benchmark::State& state) {
     }
 }
 
-struct SpscTransfer {
-    void* head{nullptr};
-    size_t count{0};
+// Copyable transport representation for handing a detached chain across a
+// lock-free ring. Ownership is governed by the queue's release/acquire slot
+// protocol rather than C++ object state, so this stays trivially copyable and
+// slot-reusable; the consumer adopts it into a move-only ObjectBatch exactly
+// once, binding the size class at the producer so it never travels separately.
+struct TransferRecord {
+    FreeChain chain{};
+    size_t size_class_idx{SizeClass::kNumSizeClasses};
 };
+static_assert(std::is_trivially_copyable_v<TransferRecord>);
+static_assert(std::is_trivially_copy_assignable_v<TransferRecord>);
 
 class SpscTransferQueue {
 public:
@@ -1232,7 +1242,7 @@ public:
         consumer_pos_.store(0, std::memory_order_relaxed);
     }
 
-    void Push(SpscTransfer transfer) {
+    void Push(TransferRecord transfer) {
         size_t producer = producer_pos_.load(std::memory_order_relaxed);
         while (producer - consumer_pos_.load(std::memory_order_acquire) == kCapacity) {
             detail::CPUPause();
@@ -1241,19 +1251,19 @@ public:
         producer_pos_.store(producer + 1, std::memory_order_release);
     }
 
-    SpscTransfer Pop() {
+    TransferRecord Pop() {
         size_t consumer = consumer_pos_.load(std::memory_order_relaxed);
         while (consumer == producer_pos_.load(std::memory_order_acquire)) {
             detail::CPUPause();
         }
-        SpscTransfer transfer = slots_[consumer & (kCapacity - 1)];
+        TransferRecord transfer = slots_[consumer & (kCapacity - 1)];
         consumer_pos_.store(consumer + 1, std::memory_order_release);
         return transfer;
     }
 
 private:
     static_assert((kCapacity & (kCapacity - 1)) == 0);
-    std::array<SpscTransfer, kCapacity> slots_{};
+    std::array<TransferRecord, kCapacity> slots_{};
     alignas(SystemConfig::CACHE_LINE_SIZE) std::atomic<size_t> producer_pos_{0};
     alignas(SystemConfig::CACHE_LINE_SIZE) std::atomic<size_t> consumer_pos_{0};
 };
@@ -1277,20 +1287,27 @@ void BM_CentralCache_CrossThread_SpscHandoff(benchmark::State& state) {
             const size_t fetched =
                     GetCentralCache().FetchRange(caller, kSpscBatchSize, kSpscObjectSize);
             if (fetched != kSpscBatchSize) {
-                spsc_queue.Push(SpscTransfer{});
+                // A short fetch still owns the returned prefix; release it so the
+                // failure path cannot leak objects or pin their Span. This runs
+                // only on the error exit, so it never pollutes normal timing.
+                GetCentralCache().ReleaseBatch(
+                        caller.PopBatch(caller.size(), SizeClass::Index(kSpscObjectSize)),
+                        CentralReleaseMode::kSpanBitmap);
+                spsc_queue.Push(TransferRecord{});
                 state.SkipWithError("SPSC producer fetch returned a short batch");
                 break;
             }
-            spsc_queue.Push(SpscTransfer{DetachFreeList(caller), fetched});
+            spsc_queue.Push(TransferRecord{DetachFreeList(caller),
+                                           SizeClass::Index(kSpscObjectSize)});
             transferred_objects += static_cast<int64_t>(fetched);
         } else {
-            const SpscTransfer transfer = spsc_queue.Pop();
-            if (!transfer.head || transfer.count != kSpscBatchSize) {
+            const TransferRecord record = spsc_queue.Pop();
+            if (record.chain.count != kSpscBatchSize) {
                 state.SkipWithError("SPSC producer failed to publish a complete batch");
                 break;
             }
-            GetCentralCache().ReleaseListToSpans(transfer.head,
-                                                 SizeClass::Index(kSpscObjectSize));
+            GetCentralCache().ReleaseBatch(
+                    ObjectBatch::AdoptChain(record.chain, record.size_class_idx));
         }
     }
     SetProcessed(state, transferred_objects, kSpscObjectSize);
@@ -1306,7 +1323,7 @@ class MpmcTransferQueue {
 
     struct Slot {
         std::atomic<size_t> sequence{0};
-        SpscTransfer data{};
+        TransferRecord data{};
     };
 
 public:
@@ -1320,7 +1337,7 @@ public:
         overflow_events_.store(0, std::memory_order_relaxed);
     }
 
-    void Push(SpscTransfer value) {
+    void Push(TransferRecord value) {
         size_t pos = head_.load(std::memory_order_relaxed);
         bool stalled = false;
         for (;;) {
@@ -1355,7 +1372,7 @@ public:
         }
     }
 
-    SpscTransfer Pop() {
+    TransferRecord Pop() {
         size_t pos = tail_.load(std::memory_order_relaxed);
         for (;;) {
             Slot& slot = slots_[pos & (Capacity - 1)];
@@ -1363,7 +1380,7 @@ public:
             const auto diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
             if (diff == 0) {
                 if (tail_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
-                    const SpscTransfer value = slot.data;
+                    const TransferRecord value = slot.data;
                     slot.sequence.store(pos + Capacity, std::memory_order_release);
                     return value;
                 }
@@ -1423,20 +1440,26 @@ void RunHandoffWithQueue(benchmark::State& state, MpmcTransferQueue<Capacity>& q
                 const size_t fetched =
                         GetCentralCache().FetchRange(caller, kSpscBatchSize, kSpscObjectSize);
                 if (fetched != kSpscBatchSize) {
-                    queue.Push(SpscTransfer{});
+                    // Release the short batch's owned prefix before bailing so the
+                    // failure path cannot leak objects or pin their Span.
+                    GetCentralCache().ReleaseBatch(
+                            caller.PopBatch(caller.size(), SizeClass::Index(kSpscObjectSize)),
+                            CentralReleaseMode::kSpanBitmap);
+                    queue.Push(TransferRecord{});
                     state.SkipWithError("handoff producer fetch returned a short batch");
                     break;
                 }
-                queue.Push(SpscTransfer{DetachFreeList(caller), fetched});
+                queue.Push(TransferRecord{DetachFreeList(caller),
+                                          SizeClass::Index(kSpscObjectSize)});
                 transferred_objects += static_cast<int64_t>(fetched);
             } else {
-                const SpscTransfer transfer = queue.Pop();
-                if (!transfer.head || transfer.count != kSpscBatchSize) {
+                const TransferRecord record = queue.Pop();
+                if (record.chain.count != kSpscBatchSize) {
                     state.SkipWithError("handoff consumer received an incomplete batch");
                     break;
                 }
-                GetCentralCache().ReleaseListToSpans(transfer.head,
-                                                     SizeClass::Index(kSpscObjectSize));
+                GetCentralCache().ReleaseBatch(
+                        ObjectBatch::AdoptChain(record.chain, record.size_class_idx));
             }
         }
         if constexpr (Pattern == HandoffPattern::kBursty) {

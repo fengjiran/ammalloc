@@ -8,6 +8,7 @@
 #include "ammalloc/central_cache.h"
 
 #include <algorithm>
+#include <utility>
 
 namespace ammalloc {
 
@@ -154,13 +155,13 @@ void ThreadCache::ReleaseAll() noexcept {
     for (size_t i = 0; i < SizeClass::kNumSizeClasses; ++i) {
         auto& list = free_lists_[i];
         if (!list.empty()) {
-            const auto chain = list.PopRange(list.size());
+            auto batch = list.PopBatch(list.size(), i);
 
             // Thread exit may occur in bursts. Preserve the ordinary bounded
             // reuse path instead of turning every TLS destructor into a hard
             // bitmap/PageCache purge; callers that require RSS reclamation use
             // the explicit owner-thread purge API before worker teardown.
-            CentralCache::GetInstance().ReleaseListToSpans(chain.head, i);
+            CentralCache::GetInstance().ReleaseBatch(std::move(batch));
         }
         SetQuota(i, 1);
         list.set_overages(0);
@@ -194,13 +195,13 @@ void ThreadCache::Trim(ThreadCacheTrimMode mode, size_t target_bytes) noexcept {
         }
 
         if (evict_count > 0) {
-            const auto chain = list.PopRangeTail(evict_count);
-            const size_t evicted_bytes = chain.count * class_size;
+            auto batch = list.PopBatchTail(evict_count, idx);
+            const size_t evicted_bytes = batch.count() * class_size;
             cached_bytes -= evicted_bytes;
             g_thread_cache_stats.trimmed_bytes.fetch_add(evicted_bytes,
                                                          std::memory_order_relaxed);
-            CentralCache::GetInstance().ReleaseListToSpans(
-                    chain.head, idx,
+            CentralCache::GetInstance().ReleaseBatch(
+                    std::move(batch),
                     mode == ThreadCacheTrimMode::kReuse
                             ? CentralReleaseMode::kTransferCache
                             : CentralReleaseMode::kSpanBitmap);
@@ -278,8 +279,8 @@ void ThreadCache::DeallocateSlowPath(size_t idx) noexcept {
     // Return at most one batch per overflow event, evicting the oldest objects
     // first so recently freed ones stay local for reuse. This bounds slow-path
     // work and avoids draining the local cache completely on every trim.
-    if (const auto chain = list.PopRangeTail(batch_num); chain.head) {
-        CentralCache::GetInstance().ReleaseListToSpans(chain.head, idx);
+    if (auto batch = list.PopBatchTail(batch_num, idx); !batch.empty()) {
+        CentralCache::GetInstance().ReleaseBatch(std::move(batch));
     }
 
     // Repeated overflow without intervening refill demand decays the quota
