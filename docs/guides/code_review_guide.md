@@ -216,7 +216,7 @@ cg_annotate cachegrind.out.*
 |------|------|------|
 | 类型 | PascalCase | `SizeClass`, `RadixNode` |
 | 函数（公共 API） | snake_case | `am_malloc`, `am_free` |
-| 函数（内部） | PascalCase | `AllocSpan`, `FetchRange` |
+| 函数（内部） | PascalCase | `AllocSpan`, `FetchBatch` |
 | 常量 | kPrefix | `kMaxShardCount`, `kStepsPerGroup` |
 | 宏 | `AM_`/`AMMALLOC_` + 大写下划线 | `AM_LIKELY`, `AMMALLOC_CHECK` |
 | 私有成员 | 下划线后缀 | `size_table_`, `mutex_` |

@@ -187,7 +187,7 @@ protected:
     PageCache&   page_cache_     = PageCache::GetInstance();
 };
 
-TEST_F(CentralCacheTest, BasicFetchRange) { ... }
+TEST_F(CentralCacheTest, BasicFetchBatch) { ... }
 ```
 
 ### 5.3 TEST_P — Parameterized
