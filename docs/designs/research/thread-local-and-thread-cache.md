@@ -616,7 +616,7 @@ cleaner 已析构完毕，重建的缓存将永远无人清理（泄漏），且
 **优雅降级**：`CreateThreadCache()` 因哨兵返回 `nullptr` 后——
 
 - `am_malloc_slow_path` 直接返回 `nullptr`（析构期分配失败安全）；
-- `am_free_slow_path` 绕过 ThreadCache，改走 `ReleaseListToSpans` 直连 CentralCache，
+- `am_free_slow_path` 绕过 ThreadCache，改走 `ReleaseBatch` 直连 CentralCache，
   保证析构期的 free 仍正确归还、不泄漏。
 
 对应概述见 [ammalloc_design.md §5.1.4](../ammalloc_design.md)。

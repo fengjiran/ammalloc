@@ -262,7 +262,7 @@ void  am_free(void* ptr);
               └───────────┬───────────┘
               ┌───────────▼───────────┐
               │ DeallocateSlowPath    │
-              │  CentralCache.ReleaseListToSpans
+              │  CentralCache.ReleaseBatch
               │   ├ TransferCache (未满)  → 存入指针数组
               │   └ 满 → Span.FreeObject (Bitmap)
               │        └ Span 空 → PageCache.ReleaseSpan → 合并
@@ -470,7 +470,7 @@ class alignas(CACHE_LINE_SIZE) ThreadCache {
 
 - TLS 指针由 `ThreadCacheCleaner`（thread\_local 析构）管理：线程退出时先 `ReleaseAll()` 将所有 FreeList 对象批量归还 CentralCache，再销毁 ThreadCache 元数据（`SystemFree` 归还 OS）。
 
-- **TLS 析构哨兵** **`g_ThreadCacheAlreadyDestructed`**：`ThreadCacheCleaner` 析构时**最先**置位该 `thread_local` 标志，随后才执行 ReleaseAll/SystemFree；`CreateThreadCache()` 入口检查该标志，已置位则直接返回 `nullptr`，不再 `SystemAlloc + placement new` 重建缓存。线程退出后其他用户 TLS 对象/静态对象的析构仍可能调用 `am_malloc`/`am_free`，若无此哨兵，懒加载逻辑会触发重建——但负责清理的 cleaner 已析构完毕，新建缓存将永远泄漏，且违背 TLS 析构顺序约定。降级行为：`am_malloc_slow_path` 直接返回 `nullptr`；`am_free_slow_path` 绕过 ThreadCache 直连 `ReleaseListToSpans` 归还 CentralCache，保证析构期的 free 仍正确归还、不泄漏。
+- **TLS 析构哨兵** **`g_ThreadCacheAlreadyDestructed`**：`ThreadCacheCleaner` 析构时**最先**置位该 `thread_local` 标志，随后才执行 ReleaseAll/SystemFree；`CreateThreadCache()` 入口检查该标志，已置位则直接返回 `nullptr`，不再 `SystemAlloc + placement new` 重建缓存。线程退出后其他用户 TLS 对象/静态对象的析构仍可能调用 `am_malloc`/`am_free`，若无此哨兵，懒加载逻辑会触发重建——但负责清理的 cleaner 已析构完毕，新建缓存将永远泄漏，且违背 TLS 析构顺序约定。降级行为：`am_malloc_slow_path` 直接返回 `nullptr`；`am_free_slow_path` 绕过 ThreadCache 直连 `ReleaseBatch` 归还 CentralCache，保证析构期的 free 仍正确归还、不泄漏。
 
 - ThreadCache 元数据本身页对齐分配（`PageAllocator::SystemAlloc`），避免递归。
 
@@ -499,7 +499,7 @@ class alignas(CACHE_LINE_SIZE) ThreadCache {
 
 - **`FetchRange(block_list, batch_num, aligned_size)`**：先从 TransferCache 抓取（SpinLock 短临界区），不足部分再从 SpanList 的 Span 上按 bitmap 切分对象；两阶段返回总数可能小于请求数。
 
-- **`ReleaseListToSpans(start, idx)`**：对象链先入 TransferCache，溢出时逐个归还所属 Span bitmap（`Span::FreeObject`）。
+- **`ReleaseBatch(batch, mode)`**：消费 move-only `ObjectBatch`（封装 head/tail/count/size_class_idx，以 `count` 为处理边界），对象链先入 TransferCache，溢出时逐个归还所属 Span bitmap（`Span::FreeObject`）。
 
 - **`GetOneSpan`（锁协议）**：SpanList 锁内发现无可用 Span 时，**先释放桶锁**再进入 PageCache 获取新 Span，取得后重新加锁插入——保证锁顺序"桶锁内不进 PageCache"，避免死锁。
 
@@ -833,11 +833,11 @@ am_free(ptr)
   │         └─ ≤ 128 页 → 合并左右空闲邻居（同 owner、≤128 页）→ 入桶 → 重写映射
   │
   └─ 小对象
-       ├─ TLS 未初始化 → CreateThreadCache()（失败则直接 ReleaseListToSpans 兜底）
+       ├─ TLS 未初始化 → CreateThreadCache()（失败则直接 ReleaseBatch 兜底）
        └─ ThreadCache::Deallocate(ptr, aligned_size)
             ├─ FreeList.Push()（无锁快路径）
             └─ size > max_size → DeallocateSlowPath
-                 └─ 批量归还 CentralCache::ReleaseListToSpans
+                 └─ 批量归还 CentralCache::ReleaseBatch
                       ├─ TransferCache 未满 → 入指针数组
                       └─ 满 → Span::FreeObject（bitmap 置位，use_count--）
                            └─ Span 全空 → PageCache::ReleaseSpan → 合并
@@ -866,7 +866,7 @@ PageHeapScavenger 线程（jthread，1s 周期）
 | 连续内存布局     | TransferCache backing、ObjectPool chunk                               | 减少 TLB miss              |
 | 分支预测       | `[[likely]]/[[unlikely]]`（AM\_LIKELY/AM\_UNLIKELY）                   | 热路径流水线优化                 |
 | 内联分工       | `AM_ALWAYS_INLINE` 快路径 / `AM_NOINLINE` 冷路径                           | 消除调用开销且不污染 I-cache       |
-| 批量搬运       | FetchRange / ReleaseListToSpans                                      | 摊薄锁开销，Span 一次服务多次 refill |
+| 批量搬运       | FetchRange / ReleaseBatch                                      | 摊薄锁开销，Span 一次服务多次 refill |
 | Relaxed 统计 | `PageAllocatorStats` 计数器                                             | 观测不阻塞热路径                 |
 | 惰性初始化      | RuntimeConfig/PageCache/Scavenger 静态存储 + placement new               | 避免单例构造递归                 |
 
