@@ -3,9 +3,9 @@
 - **状态**: Current（描述已验证实现）
 - **版本**: 1.0
 - **日期**: 2026-08-21
-- **关联代码**: [include/ammalloc/free_list.h](../../include/ammalloc/free_list.h)（全部实现位于头文件：`FreeBlock`/`FreeChain`/`FreeList`，无 `.cpp` 实现文件）
-- **上游依赖**: 仅依赖 [assert.h](../../include/ammalloc/assert.h)、[attributes.h](../../include/ammalloc/attributes.h)、[config.h](../../include/ammalloc/config.h) 的定义与标准库，无 ammalloc 模块依赖（叶子原语）
-- **下游消费者**: [ThreadCache](../../include/ammalloc/thread_cache.h)（每尺寸类别持有一个 `FreeList`）、[CentralCache](../../include/ammalloc/central_cache.h)（`FetchRange` 通过 `PushRange` 回填对象）
+- **关联代码**: [include/ammalloc/free_list.h](../../include/ammalloc/free_list.h)（全部实现位于头文件：`FreeBlock`/`FreeChain`/`ObjectBatch`/`FreeList`，无 `.cpp` 实现文件）
+- **上游依赖**: [assert.h](../../include/ammalloc/assert.h)、[attributes.h](../../include/ammalloc/attributes.h)、[config.h](../../include/ammalloc/config.h)、[size_class.h](../../include/ammalloc/size_class.h)（`ObjectBatch` 的 `kInvalidClass` 哨兵取 `SizeClass::kNumSizeClasses`，工厂用 `SizeClass::Index`）与标准库；除 `size_class.h` 外无其他 ammalloc 模块依赖（近叶子原语）
+- **下游消费者**: [ThreadCache](../../include/ammalloc/thread_cache.h)（每尺寸类别持有一个 `FreeList`）、[CentralCache](../../include/ammalloc/central_cache.h)（`FetchBatch` 返回 `ObjectBatch`，由拥有线程经 `PushBatch` 回填对象）
 - **关联测试**: [tests/unit/test_free_list.cpp](../../tests/unit/test_free_list.cpp)
 - **架构总览**: [ammalloc_design.md §4.1](ammalloc_design.md)
 
@@ -18,10 +18,10 @@
 
 ## 2. 职责与边界
 
-- **提供**：嵌入式 LIFO 空闲对象链，及其上的单对象 (`Push`/`Pop`) 与批量 (`PushRange`/`PopRange`) 操作；同时承载每类的配额状态（`max_size_`/`overages_`），供 ThreadCache 慢启动与超配衰减使用。
+- **提供**：嵌入式 LIFO 空闲对象链，及其上的单对象 (`Push`/`Pop`)、批量链 (`PushRange`/`PopRange`/`PopRangeTail`) 与 move-only 批次 (`PushBatch`/`PopBatch`/`PopBatchTail`，与 `ObjectBatch` 协作) 操作；同时承载每类的配额状态（`max_size_`/`overages_`），供 ThreadCache 慢启动与超配衰减使用。
 - **不做**：不负责对象切分、跨线程均衡、页管理；不持有/释放 Span 或页。
 - **所有权**：`FreeList` 持有的对象是分配器系统的借用对象，所有权始终属于分配器系统，不再属于调用线程或释放线程。
-- **线程模型**：`FreeList` 非线程安全。ThreadCache 内的实例线程私有（唯一 mutator 是拥有线程）；CentralCache 的 `FetchRange` 接收 `FreeList&` 时，由调用方持有的桶锁提供外部同步。
+- **线程模型**：`FreeList` 非线程安全。ThreadCache 内的实例线程私有（唯一 mutator 是拥有线程）；CentralCache 的 `FetchBatch` 返回 move-only `ObjectBatch`，由拥有线程经 `PushBatch` 回填本地 `FreeList`，CentralCache 不再直接持有 `FreeList&`。
 
 ## 3. 关键数据结构
 
@@ -30,14 +30,15 @@
 | 类型 | 含义 | 关键点 |
 |---|---|---|
 | `FreeBlock` | 嵌入式链接节点，仅含一个 `FreeBlock* next` | 存储在空闲对象体内，`static_assert(sizeof(FreeBlock) <= SystemConfig::ALIGNMENT)` 保证能塞进最小槽位 |
-| `FreeChain` | 从 FreeList 摘下的独立对象链（`head`/`tail`/`count`） | 用于批量流转，O(1) 拷贝进出 |
+| `FreeChain` | 从 FreeList 摘下的独立对象链（`head`/`tail`/`count`） | 可复制的传输表示，O(1) 拷贝进出；跨线程 transport 载体 |
+| `ObjectBatch` | move-only 所有权令牌（`head`/`tail`/`count`/`size_class_idx`） | 封装一条 detached 链 + 所属 size class；不可复制、删除 move 赋值、析构 `AM_DCHECK(empty())`；工厂 `FromSingleObject`/`AdoptChain`，反向 `DetachChainForTransport() &&`；Fetch/Release 双向以此表达所有权 |
 | `FreeList` | LIFO 空闲链 + 每类配额状态 | 见下表成员 |
 
 ### 3.2 FreeList 成员
 
 | 成员 | 含义 | 同步机制 / 备注 |
 |---|---|---|
-| `head_` (`FreeBlock*`) | 嵌入式链头 | 仅所属线程读写（CentralCache 回填时由桶锁保护） |
+| `head_` (`FreeBlock*`) | 嵌入式链头 | 仅所属线程读写（阶段2起 CentralCache 经 `FetchBatch` 返回 `ObjectBatch`，由 owner 线程 `PushBatch` 回填，不再直接持有 `FreeList&`） |
 | `size_` (`size_t`) | 当前缓存对象数 | 与 `head_` 强一致：`head_ == nullptr` 当且仅当 `size_ == 0` |
 | `max_size_` (`size_t`) | ThreadCache 高水位配额，初值 1 | 慢启动增长 / 超配批量衰减；`set_max_size` 钳到至少 1 |
 | `overages_` (`size_t`) | 连续溢出裁剪计数 | 作为配额衰减信号；refill 成功时由 ThreadCache 清零 |
@@ -46,7 +47,7 @@
 
 - **无锁、无原子**：`FreeList` 不含任何 `std::atomic`，也没有加锁逻辑；全部状态通过普通成员读写，正确性完全依赖"线程私有/外部加锁"的所有权契约。
 - **TLS 使用范围**：ThreadCache 以 `std::array<FreeList, SizeClass::kNumSizeClasses> free_lists_` 持有全部实例，线程受限；避免共享链头的锁、原子与 Cache line bouncing。
-- **跨线程间接访问**：CentralCache::`FetchRange(FreeList&)` 仅在桶锁（快路径 SpinLock / 慢路径 `std::mutex`）保护下向该 `FreeList` 回填对象，因此不需要 `FreeList` 自身做同步。
+- **跨线程间接访问**：CentralCache::`FetchBatch` 不再接收 `FreeList&`——它在桶锁（快路径 SpinLock / 慢路径 `std::mutex`）保护下把对象组装成 move-only `ObjectBatch` 返回，由拥有线程经 `PushBatch` 写入本地 `FreeList`，因此 `FreeList` 始终只被 owner 线程访问，无需自身同步。
 - **生命周期**：`FreeList` 作为 ThreadCache 的成员随 TLS 一起销毁；销毁前 ThreadCache 通过 `ReleaseAll` 把所有实例中的对象批量归还 CentralCache，确保没有悬空对象。
 
 ## 5. 接口定义
@@ -60,6 +61,9 @@
 | `PopRange` | `FreeChain PopRange(size_t n) noexcept` | 摘取链头最多 `n` 个，保持原序；产出链被终结（`tail->next == nullptr`），不足时摘取全部；O(n) | ❌ |
 | `PopRangeTail` | `FreeChain PopRangeTail(size_t n) noexcept` | 摘取链尾最多 `n` 个（驱逐最旧、保留链头最新对象供本地复用）；`n >= size_` 时整链摘取；**O(`size_`) 遍历**，非 O(n) | ❌ |
 | `Pop` | `void* Pop() noexcept` | 空表返回 `nullptr`；对下一节点发预取；`head_ = head_->next`，`--size_` | ✅ |
+| `PushBatch` | `void PushBatch(ObjectBatch batch) noexcept` | 消费 fetch 批次：`tail->next = head_` 前插整链、`size_ += count`、`MarkProcessed` 清空源 token；空批 no-op；class-agnostic（路由由 ThreadCache 负责） | ❌ |
+| `PopBatch` | `ObjectBatch PopBatch(size_t count, size_t idx) noexcept` | 摘链头最多 `count` 个封装成带 `idx` 的 move-only 批次；空链返回空批（invalid class） | ❌ |
+| `PopBatchTail` | `ObjectBatch PopBatchTail(size_t count, size_t idx) noexcept` | 摘链尾（驱逐最旧）封装成批次；O(`size_`) 遍历，供溢出 trim | ❌ |
 | `max_size` / `set_max_size` | `size_t () const` / `void (size_t n)` | 读/写高水位；`set_max_size` debug 下要求 `n >= 1`，并钳到至少 1 | ❌ |
 | `overages` / `set_overages` | `size_t () const` / `void (size_t n)` | 读/写连续溢出计数 | ❌ |
 
@@ -138,3 +142,5 @@ debug 下调用静态私有助手 `CountChain(head, tail)` 校验链长与尾可
 |---|---|---|---|
 | 2026-08-21 | 初版（FreeList 独立成文，自 02-thread-cache.md 拆分细化） | FreeList 拥有独立头文件与独立测试套件，单列模块设计 | — |
 | 2026-08-28 | 接口表补 `PopRangeTail`、新增 §6.5 算法小节；§6.6 逐项改写复杂度并给出实测值 | 该成员此前无文档，导致 `PopRange` 的 `batch` 上界被误推广到 O(`size_`) 的尾部遍历 | S-3 |
+| 2026-09-16 | 阶段1：新增 move-only `ObjectBatch`（所有权令牌）与 `FreeList::PopBatch/PopBatchTail`；`free_list.h` 因 `kInvalidClass = SizeClass::kNumSizeClasses` 起依赖 `size_class.h` | Release 方向以 move-only token 消除二次 idx 传递与重复/遗漏 release | — |
+| 2026-09-17 | 阶段2：新增 `FreeList::PushBatch` 消费 `CentralCache::FetchBatch` 返回的 `ObjectBatch`、`ObjectBatch::DetachChainForTransport() &&` 反向转 `FreeChain`；§2/§4 修正为 CentralCache 不再直接回填 `FreeList`（owner 线程 `PushBatch`） | Fetch 方向对称化，`FreeList` 始终只被 owner 线程访问 | — |

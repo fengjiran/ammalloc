@@ -4,8 +4,8 @@
 - **版本**: 1.0
 - **日期**: 2026-08-19
 - **关联代码**: [include/ammalloc/central_cache.h](../../include/ammalloc/central_cache.h) / [src/central_cache.cpp](../../src/central_cache.cpp) / [include/ammalloc/spin_lock.h](../../include/ammalloc/spin_lock.h)
-- **上游依赖**: `SizeClass`（batch/span 页数策略）、`FreeList`（FetchRange 批量传输容器）、`PageCache`（AllocSpan/ReleaseSpan）、`PageMap`（`GetSpan`）、`PageAllocator`（TransferCache backing）
-- **下游消费者**: `ThreadCache`（FetchRange/ReleaseBatch）
+- **上游依赖**: `SizeClass`（batch/span 页数策略）、`FreeList`（FetchBatch 批量传输容器）、`PageCache`（AllocSpan/ReleaseSpan）、`PageMap`（`GetSpan`）、`PageAllocator`（TransferCache backing）
+- **下游消费者**: `ThreadCache`（FetchBatch/ReleaseBatch）
 - **关联测试**: [tests/unit/test_central_cache.cpp](../../tests/unit/test_central_cache.cpp)
 - **架构总览**: [ammalloc_design.md §5.2](ammalloc_design.md)
 
@@ -18,7 +18,7 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 
 ## 2. 职责与边界
 
-- **提供**：`FetchRange`（向 ThreadCache 供批）、`ReleaseBatch`（消费 move-only `ObjectBatch` 回收对象链）。
+- **提供**：`FetchBatch`（向 ThreadCache 供批，返回 move-only `ObjectBatch`）、`ReleaseBatch`（消费 move-only `ObjectBatch` 回收对象链）。
 - **请求**：`PageCache::AllocSpan` / `PageCache::ReleaseSpan`；`PageMap::GetSpan`（释放时定位归属 Span）。
 - **所有权**：Span 元数据归 PageCache 所有，CentralCache 桶只借用（`span_list` 为借用链表）；对象的所有权按 bitmap 记录归 Span。
 - **TransferCache 初始化**：构造时尝试一次性从 `PageAllocator::SystemAlloc` 申请连续 backing，按 `capacity = 8 × batch` 切分给各桶——单次系统调用避免递归初始化，连续布局提升缓存局部性。backing OOM 时容量保持零并退化到 SpanList，而非 abort。
@@ -66,7 +66,7 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 
 | 接口 | 签名 | 语义要点 | Hot path |
 |---|---|---|---|
-| `FetchRange` | `size_t FetchRange(FreeList&, size_t batch_num, size_t aligned_size) noexcept` | `@pre batch_num <= kMaxBatchSize`；先 TransferCache 后 SpanList；返回可能小于请求（OOM 或 Span 不足） | ✅（跨层必经） |
+| `FetchBatch` | `ObjectBatch FetchBatch(size_t idx, size_t preferred_count) noexcept` | `@pre idx < kNumSizeClasses && preferred_count <= kMaxBatchSize`；先 TransferCache 后 SpanList；返回 move-only `ObjectBatch`，其 count 可能小于请求（OOM 或 Span 不足）或为空批（invalid class） | ✅（跨层必经） |
 | `ReleaseBatch` | `void ReleaseBatch(ObjectBatch, CentralReleaseMode) noexcept` | 消费 move-only `ObjectBatch`（封装 head/tail/count/size_class_idx）；以 `count` 为处理边界；默认先吸收 TransferCache，`kSpanBitmap` 直接归还 bitmap；返回前必 `MarkProcessed` | ✅ |
 | `DrainTransferCaches` | `size_t DrainTransferCaches(size_t max_bytes) noexcept` | byte-budgeted cold-end detach；spin lock 外 direct bitmap release | ❌ |
 | `Reset` | `void Reset() noexcept` | 测试/受控 teardown：还原 bitmap、归还 Span、释放并**重建** TransferCache backing（重建失败则优雅降级慢路径、不 abort） | ❌ |
@@ -75,14 +75,14 @@ CentralCache 是中端缓存：在 ThreadCache 与 PageCache 之间均衡小对�
 
 ## 6. 算法与流程
 
-### 6.1 FetchRange（两阶段）
+### 6.1 FetchBatch（两阶段）
 
 1. TransferCache 快路径：锁内取 `min(batch_num, count)` 个指针，LIFO 顺序组装对象链。
 2. 不足部分进入 SpanList：持 `span_list_lock`，从队首 Span 用 `AllocObject()` 切分对象；Span 满则立即移到队尾（包括最后一次成功分配恰好填满 Span 的边界）并重新读取队首；只有队首无可用位且不存在 partial candidate 时才通过 `GetOneSpan` 补货。
 3. **预取**：除请求数外额外提取一个 batch（`prefetch_target = batch_num`），写入 TransferCache 供下一个请求者；锁外发布。
 
 SpanList 保持 **partial-before-full** 不变量：可分配 Span 位于满 Span 之前。`ReleaseBatch`
-将刚从 full 变为 partial 的 Span 移到队首；`FetchRange` 则在 Span 变满的同一锁域内
+将刚从 full 变为 partial 的 Span 移到队首；`FetchBatch` 则在 Span 变满的同一锁域内
 将其移到队尾。旋转前必须保存 `Span*`，不得在 `erase` 后继续解引用已失效的 iterator。
 
 ### 6.2 ReleaseBatch
@@ -105,11 +105,11 @@ bucket 在本次调用中观察到的 snapshot，避免 producer 并发写入时
 
 ## 7. 边界条件与错误处理
 
-- `FetchRange` 中 `GetOneSpan` 失败（OOM）→ 返回已取数量（可能 0），不重试。
+- `FetchBatch` 中 `GetOneSpan` 失败（OOM）→ 返回已取前缀（count 可能 0，此时为空批），不重试。
 - TransferCache backing OOM → 保持 `transfer_cache_capacity == 0` 并从 SpanList 正常服务；仅受控 `Reset` 重试初始化，避免内存压力下 retry storm。
 - TransferCache 满时预取剩余对象走 ReleaseBatch，保证所有权一致。
 - `PageMap::GetSpan` 返回 null（对象不属于 ammalloc）→ 跳过该对象（不崩溃，保持分配器鲁棒）。
-- 测试注入（`AMMALLOC_TEST`）：`g_mock_fetch_range_cap` 设 `0 < cap < batch_num` 时，`FetchRange` 至多返回 `cap` 个对象，用于确定性构造「部分 refill」。
+- 测试注入（`AMMALLOC_TEST`）：`g_mock_fetch_batch_cap` 设 `0 < cap < preferred_count` 时，`FetchBatch` 至多返回 `cap` 个对象，用于确定性构造「部分 refill」。
 
 ## 8. 风险与权衡
 
@@ -123,11 +123,11 @@ bucket 在本次调用中观察到的 snapshot，避免 producer 并发写入时
 
 `tests/unit/test_central_cache.cpp`：
 
-- 功能：`BasicFetchRange`、`MultipleFetchRange`、`BasicReleaseBatch`、`DifferentSizeClasses`、`LargeBatchAllocation`
+- 功能：`BasicFetchBatch`、`MultipleFetchBatch`、`FetchBatchYieldsCanonicalClassTaggedBatch`、`BasicReleaseBatch`、`DifferentSizeClasses`、`LargeBatchAllocation`
 - 生命周期：`Reset`、`ReallocateAfterRelease`
 - 并发：`MultiThreadedAllocation`、`StressTest`、`FreeListOperations`
 
-此外，`tests/unit/test_thread_cache.cpp` 的 `PartialRefillHoldsQuotaAndOverage` 经 `g_mock_fetch_range_cap` 覆盖了 `FetchRange` 的部分返回分支。
+此外，`tests/unit/test_thread_cache.cpp` 的 `PartialRefillHoldsQuotaAndOverage` 经 `g_mock_fetch_batch_cap` 覆盖了 `FetchBatch` 的部分返回分支。
 
 ## 10. 变更记录
 
@@ -148,3 +148,4 @@ bucket 在本次调用中观察到的 snapshot，避免 producer 并发写入时
 | 2026-09-14 | `FetchRange` 在 full Span 旋转后重新读取队首，exact-fill 亦立即移尾，并禁止解引用已失效 iterator | 防止跳过现有 partial Span 而过度申请新 Span 或产生假性 OOM | S1 |
 | 2026-09-14 | `ReleaseListToSpans` 参数 `aligned_size` → `idx`（调用方均已持有 idx） | 消除 idx↔size 往返；`AM_DCHECK` 替代无法校验的 size 边界 @pre，避免静默错桶 | — |
 | 2026-09-16 | 引入 move-only `ObjectBatch`（head/tail/count/size_class_idx）与 `ReleaseBatch`，删除裸链头入口 `ReleaseListToSpans`；新增 `FreeList::PopBatch/PopBatchTail` 及 `ObjectBatch::FromSingleObject/AdoptChain` 工厂；`ReleaseBatch` 以 `count` 为处理边界 | 消除 release 边界二次 idx 传递与重复/遗漏 release（move-only + 析构断言）；`AdoptChain` 作为跨线程裸链进入所有权令牌的唯一可审计边界。阶段 1 仅 Release 方向，Fetch/Push 仍用 `FreeChain` | — |
+| 2026-09-17 | 阶段 2：Fetch 方向对称化——`FetchRange(FreeList&, batch_num, aligned_size)` → `FetchBatch(idx, preferred_count)` 返回 move-only `ObjectBatch`；新增 `FreeList::PushBatch`、`ThreadCache::AcceptFetchedBatch`、`ObjectBatch::DetachChainForTransport() &&`；mock 注入更名 `g_mock_fetch_range_cap` → `g_mock_fetch_batch_cap`；删除 `FetchRange` | 消除 CentralCache 直接写调用方 FreeList 的边界与 aligned_size↔idx 往返；Fetch/Release 均以 move-only `ObjectBatch` 表达所有权，跨线程 handoff 用 `DetachChainForTransport`→`TransferRecord`→`AdoptChain` 往返。TransferCache 底层仍为 pointer array，未动容量/预取/分片 | — |
