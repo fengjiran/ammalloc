@@ -20,6 +20,14 @@ ObjectBatch CentralCache::FetchBatch(size_t idx, size_t preferred_count) noexcep
     AM_DCHECK(idx < SizeClass::kNumSizeClasses);
     AM_DCHECK(preferred_count <= SizeClass::kMaxBatchSize);
 
+    // clang-format off
+    if (preferred_count == 0) AM_UNLIKELY {
+        // Degenerate request: canonical empty batch, without touching the bucket
+        // lock or reserving the 4 KiB scratch array.
+        return {};
+    }
+    // clang-format on
+
     // `fetch_num` is the effective request after the test-only partial-refill cap.
     size_t fetch_num = preferred_count;
 #ifdef AMMALLOC_TEST
@@ -125,19 +133,23 @@ ObjectBatch CentralCache::FetchBatch(size_t idx, size_t preferred_count) noexcep
                 begin = cur_span_list.begin();
             }
         }
+
         // Publish prefetched pointers only after leaving the Span bitmap lock domain.
         if (extracted > 0) {
             stats_.fetch_span_list_objects.fetch_add(extracted,
                                                      std::memory_order_relaxed);
         }
+
         if (traversals > 0) {
             stats_.spanlist_traversals.fetch_add(traversals,
                                                  std::memory_order_relaxed);
         }
+
         if (rotations > 0) {
             stats_.spanlist_rotations.fetch_add(rotations,
                                                 std::memory_order_relaxed);
         }
+
         lock.unlock();
 
         if (actual_prefetched > 0) {
@@ -178,7 +190,7 @@ ObjectBatch CentralCache::FetchBatch(size_t idx, size_t preferred_count) noexcep
     }
     // `fetched` is the node count of the head/tail chain built above; the
     // canonical constructor debug-verifies reachability, so keep them in lockstep.
-    return ObjectBatch(head, tail, fetched, idx);
+    return {head, tail, fetched, idx};
 }
 
 const CentralCacheStats& CentralCache::GetStats() noexcept {
