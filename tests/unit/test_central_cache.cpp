@@ -189,24 +189,29 @@ TEST_F(CentralCacheTest, Reset) {
 }
 
 TEST_F(CentralCacheTest, TransferCacheOomDegradesToSpanList) {
-    // Release the existing backing before enabling the system-allocation hook;
-    // Reset then exercises the same no-abort initialization path used by the
-    // singleton constructor when backing allocation is unavailable.
-    central_cache_.Reset();
-    page_cache_.Reset();
+    // SetUp already reset both singletons with the backing rebuilt (capacity>0).
+    // Enabling the alloc-fail hook and resetting again exercises the same no-abort
+    // init path the singleton constructor uses when backing is unavailable: the
+    // rebuild fails, capacity stays 0, and Reset must not abort.
     g_mock_normal_alloc_fail.store(true, std::memory_order_relaxed);
     EXPECT_NO_THROW(central_cache_.Reset());
     g_mock_normal_alloc_fail.store(false, std::memory_order_relaxed);
 
     FreeList list;
     ASSERT_GT(FetchToList(central_cache_, list, 1, 64), 0u);
+    // capacity==0 leaves the prefetched objects nowhere to reside, so FetchBatch
+    // rolls them all back to their Span bitmaps and the TransferCache stays empty.
+    // This is the observable proof of degradation: had the backing been rebuilt
+    // (capacity>0), the prefetch would land here and this count would be >0.
+    EXPECT_EQ(central_cache_.GetTransferCacheCountForTest(SizeClass::Index(64)), 0u);
     void* object = list.Pop();
-    central_cache_.ReleaseBatch(ObjectBatch::FromSingleObject(object, SizeClass::Index(64)));
+    central_cache_.ReleaseBatch(ObjectBatch::FromSingleObject(
+            object, SizeClass::Index(64)));
 }
 
 TEST_F(CentralCacheTest, DirectBitmapReleaseUnpinsSpanWithoutTransferCache) {
     constexpr size_t kSize = 64;
-    const size_t idx = SizeClass::Index(kSize);
+    constexpr size_t idx = SizeClass::Index(kSize);
     FreeList list;
     ASSERT_EQ(FetchToList(central_cache_, list, 1, kSize), 1u);
     void* object = list.Pop();
@@ -227,7 +232,7 @@ TEST_F(CentralCacheTest, DirectBitmapReleaseUnpinsSpanWithoutTransferCache) {
 
 TEST_F(CentralCacheTest, TransferCacheDrainHonorsByteBudgetAndPreservesHealth) {
     constexpr size_t kSize = 64;
-    const size_t idx = SizeClass::Index(kSize);
+    constexpr size_t idx = SizeClass::Index(kSize);
     FreeList list;
     ASSERT_EQ(FetchToList(central_cache_, list, 1, kSize), 1u);
     void* object = list.Pop();
