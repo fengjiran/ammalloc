@@ -85,7 +85,7 @@ public:
     /// @note Validates only the descriptor shape and idx range; it does NOT
     ///       query PageMap to prove the object's real class, which would
     ///       duplicate slow-path work. Object-class correctness is a precondition.
-    AM_NODISCARD static ObjectBatch FromSingleObject(void* object, size_t idx) noexcept {
+    static ObjectBatch FromSingleObject(void* object, size_t idx) noexcept {
         AM_DCHECK(object != nullptr);
         AM_DCHECK(idx < SizeClass::kNumSizeClasses);
         if (!object) {
@@ -108,7 +108,7 @@ public:
     ///       (lock-free queue, remote-free queue, backend completion) becomes a
     ///       move-only token. It does NOT query PageMap; class ownership stays a
     ///       caller precondition, checked on the normal release path as applicable.
-    AM_NODISCARD static ObjectBatch AdoptChain(FreeChain chain, size_t idx) noexcept {
+    static ObjectBatch AdoptChain(FreeChain chain, size_t idx) noexcept {
         AM_DCHECK(idx < SizeClass::kNumSizeClasses);
         if (chain.count == 0) {
             AM_DCHECK(chain.head == nullptr);
@@ -122,18 +122,22 @@ public:
     AM_NODISCARD bool empty() const noexcept {
         return count_ == 0;
     }
+
     /// @brief Hottest node, the next one a consumer should take.
     AM_NODISCARD void* head() const noexcept {
         return head_;
     }
+
     /// @brief Coldest node; `tail()->next == nullptr` in a well-formed batch.
     AM_NODISCARD void* tail() const noexcept {
         return tail_;
     }
+
     /// @brief Number of objects in the chain.
     AM_NODISCARD size_t count() const noexcept {
         return count_;
     }
+
     /// @brief Size class owning every object; `kInvalidClass` when empty.
     AM_NODISCARD size_t size_class_idx() const noexcept {
         return size_class_idx_;
@@ -153,6 +157,7 @@ public:
         if (empty()) {
             return {};
         }
+
         FreeChain out{head_, tail_, count_};
         MarkProcessed();
         return out;
@@ -375,29 +380,29 @@ public:
     }
 
     /// @brief Detaches up to `count` front objects as a move-only owned batch.
-    /// @param count Maximum number of objects to remove.
+    /// @param n Maximum number of objects to remove.
     /// @param idx Size class owning every object in this list.
     /// @return Batch tagging the PopRange chain with `idx`; empty when the list
     ///         holds nothing (an empty batch must carry `kInvalidClass`).
-    AM_NODISCARD ObjectBatch PopBatch(size_t count, size_t idx) noexcept {
-        const FreeChain chain = PopRange(count);
-        if (chain.count == 0) {
+    AM_NODISCARD ObjectBatch PopBatch(size_t n, size_t idx) noexcept {
+        const auto [head, tail, count] = PopRange(n);
+        if (count == 0) {
             return {};
         }
-        return {chain.head, chain.tail, chain.count, idx};
+        return {head, tail, count, idx};
     }
 
     /// @brief Detaches up to `count` back objects as a move-only owned batch.
-    /// @param count Maximum number of objects to remove.
+    /// @param n Maximum number of objects to remove.
     /// @param idx Size class owning every object in this list.
     /// @return Batch tagging the PopRangeTail chain with `idx`; empty when
     ///         nothing is evictable.
-    AM_NODISCARD ObjectBatch PopBatchTail(size_t count, size_t idx) noexcept {
-        const FreeChain chain = PopRangeTail(count);
-        if (chain.count == 0) {
+    AM_NODISCARD ObjectBatch PopBatchTail(size_t n, size_t idx) noexcept {
+        const auto [head, tail, count] = PopRangeTail(n);
+        if (count == 0) {
             return {};
         }
-        return {chain.head, chain.tail, chain.count, idx};
+        return {head, tail, count, idx};
     }
 
     /// @brief Removes the most recently pushed object.

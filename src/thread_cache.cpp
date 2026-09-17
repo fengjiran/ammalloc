@@ -246,8 +246,8 @@ void* ThreadCache::FetchFromCentralCache(size_t idx) noexcept {
     // early refills small so cold size classes do not immediately hoard a full
     // batch in every thread.
     const auto fetch_num = std::min(batch_num, list.max_size());
-    ObjectBatch batch = CentralCache::GetInstance().FetchBatch(idx, fetch_num);
-    const size_t fetched = batch.count();
+    auto batch = CentralCache::GetInstance().FetchBatch(idx, fetch_num);
+    const auto fetched = batch.count();
     if (fetched == 0) {
         return nullptr;// CentralCache exhausted for this size class.
     }
